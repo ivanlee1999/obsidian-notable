@@ -94,6 +94,25 @@ export class CouchClient {
   }
 
   /**
+   * One document's attachment, as raw bytes.
+   *
+   * `requestUrl` hands back an ArrayBuffer whatever the content type, which is what lets a PNG
+   * come through the host process the same way JSON does — a renderer `fetch` would be back to
+   * arguing with CORS about a homeserver that has never heard of it.
+   */
+  async attachment(database: string, documentId: string, name: string): Promise<ArrayBuffer> {
+    const url =
+      `${this.base}/${encodeURIComponent(database)}` +
+      `/${encodeURIComponent(documentId)}/${encodeURIComponent(name)}`;
+
+    const response = await requestUrl({ url, headers: this.headers, throw: false });
+    if (response.status >= 400) {
+      throw new Error(`Fetching "${name}" from "${documentId}" failed with ${response.status}.`);
+    }
+    return response.arrayBuffer;
+  }
+
+  /**
    * Every document whose id starts with [prefix].
    *
    * Used for the library's notebooks and folders, which are read whole at startup rather than

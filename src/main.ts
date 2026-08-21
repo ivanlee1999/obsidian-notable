@@ -5,19 +5,40 @@ import {
   PluginSettingTab,
   Setting,
   TFile,
+  TFolder,
   normalizePath,
 } from "obsidian";
 import { CouchClient } from "./couch.ts";
 import {
+  idOf,
   isFolderId,
   isNotebookId,
   isPageTextId,
   type FolderDoc,
   type NotebookDoc,
+  type PageImageDoc,
   type PageTextDoc,
 } from "./model.ts";
 import { Library, type PlannedNote } from "./projection.ts";
 import { MANAGED_BY } from "./render.ts";
+
+/**
+ * Where rendered ink lives inside the configured folder, and the attachment scribe writes.
+ *
+ * A leading underscore keeps it sorting away from the notes themselves, which is the only thing
+ * in that folder a reader has any reason to open.
+ */
+const INK_FOLDER = "_ink";
+const INK_ATTACHMENT = "page.png";
+
+/**
+ * A filename-safe slice of CouchDB's attachment digest, which arrives as `md5-<base64>` and so
+ * carries `+`, `/` and `=` that have no business in a vault path.
+ */
+function digestTag(digest: string | undefined): string {
+  const cleaned = (digest ?? "").replace(/[^a-zA-Z0-9]/g, "");
+  return cleaned.slice(-8) || "0";
+}
 
 interface Settings {
   url: string;
@@ -25,6 +46,10 @@ interface Settings {
   password: string;
   notesDatabase: string;
   textDatabase: string;
+  /** Rendered ink. Empty means notes are text only. */
+  imagesDatabase: string;
+  /** Ink beside the text rather than under it. Needs the CSS snippet to actually lay out. */
+  sideBySide: boolean;
   folder: string;
   pollMinutes: number;
   /** Where the text feed was last read up to. Resetting it rebuilds every note. */
@@ -37,6 +62,8 @@ const DEFAULTS: Settings = {
   password: "",
   notesDatabase: "notes",
   textDatabase: "notes_text",
+  imagesDatabase: "notes_images",
+  sideBySide: false,
   folder: "Handwritten",
   pollMinutes: 5,
   checkpoint: "0",
@@ -140,6 +167,10 @@ export default class NotableHandwritingPlugin extends Plugin {
         if (changes.rows.length === 0) break;
       }
 
+      // Before the vault write, because a note may only embed an image that is already on disk.
+      this.library.setInkPaths(await this.syncInk(client));
+      this.library.setSideBySide(this.settings.sideBySide);
+
       const written = await this.writeVault();
 
       // The checkpoint moves only after the vault write, so a failure part-way through is retried
@@ -160,6 +191,67 @@ export default class NotableHandwritingPlugin extends Plugin {
       if (announce) new Notice(`Notable: ${message}`);
     } finally {
       this.syncing = false;
+    }
+  }
+
+  /**
+   * Downloads the rendered ink and returns where each page's image landed.
+   *
+   * Content-addressed rather than checkpointed: the filename carries a slice of the attachment's
+   * digest, so a file that exists is a file that is current, and ink that has been written on
+   * since becomes a different name rather than an in-place overwrite. That makes this safe to
+   * run repeatedly, and correct after an interrupted sync, without keeping any state of its own.
+   */
+  private async syncInk(client: CouchClient): Promise<Map<string, string>> {
+    const paths = new Map<string, string>();
+    if (!this.settings.imagesDatabase) return paths;
+
+    const root = normalizePath(`${this.settings.folder}/${INK_FOLDER}`);
+    let docs: PageImageDoc[];
+    try {
+      docs = await client.allWithPrefix<PageImageDoc>(this.settings.imagesDatabase, "pageimage:");
+    } catch (error) {
+      // Text is the point of this plugin; missing pictures must not stop a sync. A misconfigured
+      // or absent images database should leave the notes exactly as they would have been.
+      console.warn("Notable: could not list rendered ink", error);
+      return paths;
+    }
+    if (docs.length === 0) return paths;
+
+    const wanted = new Set<string>();
+    for (const doc of docs) {
+      if (doc._deleted) continue;
+      const pageId = doc.pageId ?? idOf(doc._id);
+      const attachment = doc._attachments?.[INK_ATTACHMENT];
+      if (!pageId || !attachment) continue;
+
+      const path = normalizePath(`${root}/${pageId}-${digestTag(attachment.digest)}.png`);
+      wanted.add(path);
+      paths.set(pageId, path);
+
+      if (this.app.vault.getAbstractFileByPath(path)) continue;
+      try {
+        const bytes = await client.attachment(this.settings.imagesDatabase, doc._id, INK_ATTACHMENT);
+        await this.ensureFolder(path);
+        await this.app.vault.createBinary(path, bytes);
+      } catch (error) {
+        console.warn(`Notable: could not fetch ink for ${pageId}`, error);
+        paths.delete(pageId);
+      }
+    }
+
+    await this.removeStrandedInk(root, wanted);
+    return paths;
+  }
+
+  /** Deletes ink files no page points at any more — a page rewritten leaves its old render behind. */
+  private async removeStrandedInk(root: string, wanted: Set<string>): Promise<void> {
+    const folder = this.app.vault.getAbstractFileByPath(root);
+    if (!(folder instanceof TFolder)) return;
+    for (const child of folder.children) {
+      if (child instanceof TFile && !wanted.has(child.path)) {
+        await this.app.vault.trash(child, true);
+      }
     }
   }
 
@@ -338,6 +430,35 @@ class NotableSettingTab extends PluginSettingTab {
       .addText((text) =>
         text.setValue(this.plugin.settings.textDatabase).onChange(async (value) => {
           this.plugin.settings.textDatabase = value.trim() || "notes_text";
+          await this.plugin.saveSettings();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName("Images database")
+      .setDesc(
+        "Where the rendered ink is published, so each page can show the writing under its text. " +
+          "Leave empty for text-only notes.",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("notes_images")
+          .setValue(this.plugin.settings.imagesDatabase)
+          .onChange(async (value) => {
+            this.plugin.settings.imagesDatabase = value.trim();
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Handwriting beside the text")
+      .setDesc(
+        "Puts each page's writing next to its transcription instead of under it. Needs the " +
+          "notable-side-by-side.css snippet from the plugin repo, enabled under Appearance.",
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.sideBySide).onChange(async (value) => {
+          this.plugin.settings.sideBySide = value;
           await this.plugin.saveSettings();
         }),
       );

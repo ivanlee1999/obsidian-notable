@@ -9,7 +9,19 @@ export interface NoteInput {
   createdAt?: string;
   updatedAt?: string;
   pages: PageEntry[];
+  /** Put the ink beside its text rather than under it. Needs the CSS snippet to take effect. */
+  sideBySide?: boolean;
 }
+
+/**
+ * The cssclass that the side-by-side snippet keys off.
+ *
+ * Presentation is left to CSS rather than baked into the markdown — a two-column table would put
+ * the same pages on screen, at the cost of `<br>` in place of every line break and an escape in
+ * front of every pipe. The text in these notes is the point of the whole exercise, and it stays
+ * plain: without the snippet installed the note simply reads as it did before, stacked.
+ */
+export const SIDE_BY_SIDE_CLASS = "notable-side-by-side";
 
 /**
  * A note's full contents, rendered from scratch every time.
@@ -25,34 +37,83 @@ export function renderNote(input: NoteInput): string {
     ...(input.createdAt ? [`created: ${yamlString(input.createdAt)}`] : []),
     ...(input.updatedAt ? [`updated: ${yamlString(input.updatedAt)}`] : []),
     `notable-id: ${yamlString(input.notebookId)}`,
+    ...(input.sideBySide ? ["cssclasses:", `  - ${SIDE_BY_SIDE_CLASS}`] : []),
     // The marker that makes this note the plugin's to overwrite, and the id that lets a rename be
     // a rename. Removing either by hand is how a reader takes a note back into their own keeping.
     `managed-by: ${yamlString(MANAGED_BY)}`,
     "---",
   ].join("\n");
 
-  const body = input.pages.map(renderPage).join("\n\n");
+  const body = input.pages.map((page) => renderPage(page, input.sideBySide ?? false)).join("\n\n");
   return `${frontmatter}\n\n${body}\n`;
 }
 
-function renderPage(page: PageEntry): string {
-  const heading = page.title
-    ? `## Page ${page.number} — ${page.title}`
-    : `## Page ${page.number}`;
+/** How much of a first line is worth carrying into a heading before it stops being a label. */
+const LABEL_LIMIT = 60;
 
-  if (page.text === null) {
-    return `${heading}\n\n*Not recognized yet.*`;
-  }
-  if (page.text.trim() === "") {
-    return `${heading}\n\n*No handwriting found on this page.*`;
-  }
+/**
+ * A short label for a page's heading, so that the outline pane says something.
+ *
+ * Without one, a seven-page notebook outlines as "Page 1" through "Page 7" — a list of numbers
+ * the reader already had. The page's own title wins when it has one; otherwise the first line of
+ * what was read is the closest thing to a subject the page has, and it is the line most likely to
+ * be a heading in the writing itself.
+ *
+ * The line is left in the body as well as the heading. Cutting it would mean a note that is not
+ * everything the page said, to save one repeated line.
+ */
+export function pageLabel(page: PageEntry): string | null {
+  const title = page.title?.trim();
+  if (title) return title;
+  if (page.text === null) return null;
+
+  const first = page.text
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  return first === undefined ? null : labelFrom(first);
+}
+
+function labelFrom(line: string): string | null {
+  const cleaned = line
+    // A leading bullet or number tells a reader nothing the page number beside it did not.
+    .replace(/^(?:[-*+•]|\d+[.)]|[①-⑳])\s*/, "")
+    // Headings render wikilinks, so a transcription containing [[...]] would put a link in the
+    // outline pointing at whatever happened to be written.
+    .replace(/[[\]]/g, "")
+    // A leading # would nest the heading a level deeper than it belongs.
+    .replace(/^#+\s*/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!cleaned) return null;
+  return cleaned.length > LABEL_LIMIT
+    ? `${cleaned.slice(0, LABEL_LIMIT).trimEnd()}…`
+    : cleaned;
+}
+
+function renderPage(page: PageEntry, sideBySide: boolean): string {
+  const label = pageLabel(page);
+  const heading = label ? `## Page ${page.number} — ${label}` : `## Page ${page.number}`;
+  const embed = page.inkPath ? `![[${page.inkPath}]]` : "";
+
+  // Stacked, the ink goes after the text, so a note reads top to bottom as writing with the
+  // page there to check it against. Side by side it has to come first: the snippet floats it,
+  // and a float only has text to sit beside if that text follows it in the document.
+  const above = sideBySide && embed ? `${embed}\n\n` : "";
+  const below = !sideBySide && embed ? `\n\n${embed}` : "";
+
+  const say = (line: string) => `${heading}\n\n${above}${line}${below}`;
+
+  if (page.text === null) return say("*Not recognized yet.*");
+  if (page.text.trim() === "") return say("*No handwriting found on this page.*");
 
   // Said in a comment rather than in the prose: it is a fact about the sync, not about the note,
   // and a reader skimming their own writing should not have to read past a warning to reach it.
   const staleness = page.stale
     ? "<!-- This page has been written on since it was last recognized. -->\n"
     : "";
-  return `${heading}\n\n${staleness}${page.text.trim()}`;
+  return say(`${staleness}${page.text.trim()}`);
 }
 
 /**
