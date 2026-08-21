@@ -56,11 +56,33 @@ export interface PageEntry {
   title: string | null;
   text: string | null;
   stale: boolean;
+  /** Vault-relative path of the rendered ink, when there is one to embed. */
+  inkPath: string | null;
 }
 
 export const idOf = (prefixed: string): string => prefixed.slice(prefixed.indexOf(":") + 1);
 
 export const pageTextId = (pageId: string): string => `pagetext:${pageId}`;
+
+export const pageImageId = (pageId: string): string => `pageimage:${pageId}`;
+
+/**
+ * The rendered ink of one page, in its own database.
+ *
+ * Separate from the text because the tablets replicate `notes_text` and already hold the ink;
+ * none of them should be made to pull back a picture of what they drew. The PNG itself is a
+ * CouchDB attachment, fetched separately — these documents come back as stubs.
+ */
+export interface PageImageDoc {
+  _id: string;
+  _deleted?: boolean;
+  pageId?: string;
+  notebookId?: string | null;
+  width?: number;
+  height?: number;
+  renderedClock?: string;
+  _attachments?: Record<string, { content_type?: string; digest?: string; length?: number }>;
+}
 
 /** Whether a document id belongs to a type this plugin reads. */
 export const isNotebookId = (id: string): boolean => id.startsWith("notebook:");

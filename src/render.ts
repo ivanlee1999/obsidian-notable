@@ -40,11 +40,15 @@ function renderPage(page: PageEntry): string {
     ? `## Page ${page.number} — ${page.title}`
     : `## Page ${page.number}`;
 
+  // The ink goes after whatever is said about the page, so that a note stays readable top to
+  // bottom as text and the writing is there to check it against when a line looks wrong.
+  const ink = page.inkPath ? `\n\n![[${page.inkPath}]]` : "";
+
   if (page.text === null) {
-    return `${heading}\n\n*Not recognized yet.*`;
+    return `${heading}\n\n*Not recognized yet.*${ink}`;
   }
   if (page.text.trim() === "") {
-    return `${heading}\n\n*No handwriting found on this page.*`;
+    return `${heading}\n\n*No handwriting found on this page.*${ink}`;
   }
 
   // Said in a comment rather than in the prose: it is a fact about the sync, not about the note,
@@ -52,7 +56,7 @@ function renderPage(page: PageEntry): string {
   const staleness = page.stale
     ? "<!-- This page has been written on since it was last recognized. -->\n"
     : "";
-  return `${heading}\n\n${staleness}${page.text.trim()}`;
+  return `${heading}\n\n${staleness}${page.text.trim()}${ink}`;
 }
 
 /**

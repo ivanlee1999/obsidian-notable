@@ -114,6 +114,17 @@ export class Library {
     return path;
   }
 
+  /**
+   * Vault paths of rendered ink, by page id. Set by the plugin after it has written the files,
+   * so that a note only ever embeds an image that is actually on disk — a wikilink to a missing
+   * file renders as broken text in the middle of someone's notes.
+   */
+  private inkPaths = new Map<string, string>();
+
+  setInkPaths(paths: Map<string, string>): void {
+    this.inkPaths = paths;
+  }
+
   private pages(notebook: NotebookDoc): PageEntry[] {
     return (notebook.pageIds ?? []).map((pageId, index) => {
       const text = this.texts.get(pageId);
@@ -128,6 +139,7 @@ export class Library {
         // every page of a vault whose page clocks the plugin has never been told.
         stale:
           pageClock !== null && recognizedClock !== null && pageClock > recognizedClock,
+        inkPath: this.inkPaths.get(pageId) ?? null,
       };
     });
   }

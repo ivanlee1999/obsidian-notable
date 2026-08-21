@@ -9,6 +9,7 @@ const page = (overrides: Partial<PageEntry> = {}): PageEntry => ({
   title: null,
   text: "milk, eggs",
   stale: false,
+  inkPath: null,
   ...overrides,
 });
 
@@ -102,4 +103,31 @@ test("folders on the tablet become folders in the vault", () => {
     notePath("Handwritten", ["Work", "2026"], "Standups", "id", false),
     "Handwritten/Work/2026/Standups.md",
   );
+});
+
+test("a page embeds its ink under the text when there is a render of it", () => {
+  const note = renderNote({
+    notebookId: "n1",
+    title: "Groceries",
+    pages: [page({ inkPath: "Handwritten/_ink/page-1-a1b2c3d4.png" })],
+  });
+  // Under the text, not above it: the note reads top to bottom as writing, with the ink there
+  // to check a line against when it looks wrong.
+  assert.match(note, /milk, eggs\n\n!\[\[Handwritten\/_ink\/page-1-a1b2c3d4\.png\]\]/);
+});
+
+test("a page with no render of its ink embeds nothing", () => {
+  const note = renderNote({ notebookId: "n1", title: "Groceries", pages: [page()] });
+  assert.doesNotMatch(note, /!\[\[/);
+});
+
+test("an unrecognized page still shows its ink", () => {
+  // The ink is the only thing worth having on a page nothing has read yet, so it must not be
+  // conditional on there being text.
+  const note = renderNote({
+    notebookId: "n1",
+    title: "Groceries",
+    pages: [page({ text: null, inkPath: "Handwritten/_ink/page-1-a1b2c3d4.png" })],
+  });
+  assert.match(note, /\*Not recognized yet\.\*\n\n!\[\[Handwritten\/_ink\/page-1-a1b2c3d4\.png\]\]/);
 });
