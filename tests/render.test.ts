@@ -1,6 +1,13 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { MANAGED_BY, notePath, renderNote, sanitizeFilename, yamlString } from "../src/render.ts";
+import {
+  MANAGED_BY,
+  notePath,
+  pageLabel,
+  renderNote,
+  sanitizeFilename,
+  yamlString,
+} from "../src/render.ts";
 import type { PageEntry } from "../src/model.ts";
 
 const page = (overrides: Partial<PageEntry> = {}): PageEntry => ({
@@ -27,7 +34,9 @@ test("pages are numbered and titled from the notebook's order", () => {
     pages: [page({ number: 1 }), page({ number: 2, title: "Second thoughts", text: "later" })],
   });
 
-  assert.match(note, /## Page 1\n/);
+  // An untitled page takes its label from the first line it was read as; an explicit page title
+  // wins over that.
+  assert.match(note, /## Page 1 — milk, eggs/);
   assert.match(note, /## Page 2 — Second thoughts/);
 });
 
@@ -130,4 +139,58 @@ test("an unrecognized page still shows its ink", () => {
     pages: [page({ text: null, inkPath: "Handwritten/_ink/page-1-a1b2c3d4.png" })],
   });
   assert.match(note, /\*Not recognized yet\.\*\n\n!\[\[Handwritten\/_ink\/page-1-a1b2c3d4\.png\]\]/);
+});
+
+test("a page heading is labelled from the first line it was read as", () => {
+  // Without this an outline of a seven-page notebook is "Page 1" through "Page 7", which is a
+  // list of numbers the reader already had.
+  const note = renderNote({
+    notebookId: "n1",
+    title: "Meeting",
+    pages: [page({ text: "opik vs longsmith\n& might use it,\n\nRCB ← database" })],
+  });
+  assert.match(note, /## Page 1 — opik vs longsmith\n/);
+  // And the line stays in the body: a note that is not everything the page said, to save one
+  // repeated line, is the wrong trade.
+  assert.match(note, /\n\nopik vs longsmith\n/);
+});
+
+test("a label drops list markers and is cut to a length that is still a label", () => {
+  assert.equal(pageLabel(page({ text: "1. Deterministic investigation" })), "Deterministic investigation");
+  assert.equal(pageLabel(page({ text: "- milk, eggs" })), "milk, eggs");
+  assert.equal(pageLabel(page({ text: "### a heading" })), "a heading");
+  assert.equal(pageLabel(page({ text: "x".repeat(200) })), "x".repeat(60) + "…");
+});
+
+test("a label never carries a wikilink into the outline", () => {
+  // Headings render links, so a transcription containing brackets would put one in the outline
+  // pointing wherever the handwriting happened to land.
+  assert.equal(pageLabel(page({ text: "[[Some Note]] and more" })), "Some Note and more");
+});
+
+test("a page with nothing read yet has no label", () => {
+  assert.equal(pageLabel(page({ text: null })), null);
+  assert.equal(pageLabel(page({ text: "   " })), null);
+});
+
+test("side by side puts the ink before the text and sets the cssclass", () => {
+  // The float in the snippet only has text to sit beside if that text follows it.
+  const note = renderNote({
+    notebookId: "n1",
+    title: "Meeting",
+    sideBySide: true,
+    pages: [page({ text: "milk, eggs", inkPath: "Handwritten/_ink/p-1.png" })],
+  });
+  assert.match(note, /cssclasses:\n {2}- notable-side-by-side/);
+  assert.match(note, /!\[\[Handwritten\/_ink\/p-1\.png\]\]\n\nmilk, eggs/);
+});
+
+test("stacked keeps the ink after the text and adds no cssclass", () => {
+  const note = renderNote({
+    notebookId: "n1",
+    title: "Meeting",
+    pages: [page({ text: "milk, eggs", inkPath: "Handwritten/_ink/p-1.png" })],
+  });
+  assert.doesNotMatch(note, /cssclasses/);
+  assert.match(note, /milk, eggs\n\n!\[\[Handwritten\/_ink\/p-1\.png\]\]/);
 });

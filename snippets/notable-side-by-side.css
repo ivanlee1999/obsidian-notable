@@ -1,0 +1,50 @@
+/*
+ * Puts a page's handwriting beside its transcription instead of under it.
+ *
+ * Install: copy this file into <vault>/.obsidian/snippets/, then enable it under
+ * Settings -> Appearance -> CSS snippets. The plugin adds the cssclass below to the notes it
+ * writes, so nothing else in the vault is affected.
+ *
+ * Float rather than flexbox or grid, deliberately. The well-known snippets that flexed embedded
+ * images broke when Obsidian changed how it groups them, and could not be fixed — they depended
+ * on the image and its text being siblings inside a container the markdown never promised. A
+ * float depends on nothing but document order, which is why the plugin emits the embed before
+ * the text it should sit beside.
+ *
+ * Without this snippet the notes are still correct: the ink simply appears above its text.
+ */
+
+.notable-side-by-side .internal-embed.image-embed {
+  float: right;
+  width: 45%;
+  margin: 0 0 0.75em 1.25em;
+}
+
+.notable-side-by-side .internal-embed.image-embed img {
+  width: 100%;
+  height: auto;
+  /* The renders are ink on white. A border keeps the page from bleeding into a light theme's
+     background, and dimming keeps it from glaring out of a dark one. */
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+}
+
+.theme-dark .notable-side-by-side .internal-embed.image-embed img {
+  filter: invert(1) hue-rotate(180deg);
+  opacity: 0.85;
+}
+
+/* Each page starts a fresh row, so a short transcription cannot pull the next page's heading up
+   alongside the previous page's ink. */
+.notable-side-by-side h2 {
+  clear: both;
+}
+
+/* A phone is not wide enough for two columns of anything. */
+@media (max-width: 700px) {
+  .notable-side-by-side .internal-embed.image-embed {
+    float: none;
+    width: 100%;
+    margin: 0.75em 0;
+  }
+}

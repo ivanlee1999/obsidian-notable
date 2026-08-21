@@ -48,6 +48,8 @@ interface Settings {
   textDatabase: string;
   /** Rendered ink. Empty means notes are text only. */
   imagesDatabase: string;
+  /** Ink beside the text rather than under it. Needs the CSS snippet to actually lay out. */
+  sideBySide: boolean;
   folder: string;
   pollMinutes: number;
   /** Where the text feed was last read up to. Resetting it rebuilds every note. */
@@ -61,6 +63,7 @@ const DEFAULTS: Settings = {
   notesDatabase: "notes",
   textDatabase: "notes_text",
   imagesDatabase: "notes_images",
+  sideBySide: false,
   folder: "Handwritten",
   pollMinutes: 5,
   checkpoint: "0",
@@ -166,6 +169,7 @@ export default class NotableHandwritingPlugin extends Plugin {
 
       // Before the vault write, because a note may only embed an image that is already on disk.
       this.library.setInkPaths(await this.syncInk(client));
+      this.library.setSideBySide(this.settings.sideBySide);
 
       const written = await this.writeVault();
 
@@ -444,6 +448,19 @@ class NotableSettingTab extends PluginSettingTab {
             this.plugin.settings.imagesDatabase = value.trim();
             await this.plugin.saveSettings();
           }),
+      );
+
+    new Setting(containerEl)
+      .setName("Handwriting beside the text")
+      .setDesc(
+        "Puts each page's writing next to its transcription instead of under it. Needs the " +
+          "notable-side-by-side.css snippet from the plugin repo, enabled under Appearance.",
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.sideBySide).onChange(async (value) => {
+          this.plugin.settings.sideBySide = value;
+          await this.plugin.saveSettings();
+        }),
       );
 
     new Setting(containerEl)

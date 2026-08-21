@@ -125,6 +125,12 @@ export class Library {
     this.inkPaths = paths;
   }
 
+  private sideBySide = false;
+
+  setSideBySide(on: boolean): void {
+    this.sideBySide = on;
+  }
+
   private pages(notebook: NotebookDoc): PageEntry[] {
     return (notebook.pageIds ?? []).map((pageId, index) => {
       const text = this.texts.get(pageId);
@@ -180,6 +186,7 @@ export class Library {
           createdAt: notebook.createdAt,
           updatedAt: notebook.updatedAt,
           pages,
+          sideBySide: this.sideBySide,
         }),
       });
     }
