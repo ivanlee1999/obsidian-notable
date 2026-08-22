@@ -16,7 +16,7 @@ import {
   type NotebookDoc,
   type PageTextDoc,
 } from "./model.ts";
-import { Library, type PlannedNote } from "./projection.ts";
+import { Library, type LibrarySnapshot, type PlannedNote } from "./projection.ts";
 import { MANAGED_BY } from "./render.ts";
 
 interface Settings {
@@ -29,6 +29,11 @@ interface Settings {
   pollMinutes: number;
   /** Where the text feed was last read up to. Resetting it rebuilds every note. */
   checkpoint: string;
+}
+
+/** What is stored beside the settings in the plugin's data file. */
+interface PersistedProjection {
+  projection?: LibrarySnapshot;
 }
 
 const DEFAULTS: Settings = {
@@ -77,11 +82,26 @@ export default class NotableHandwritingPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULTS, await this.loadData());
+    const data = (await this.loadData()) as (Partial<Settings> & PersistedProjection) | null;
+    this.settings = Object.assign({}, DEFAULTS, data ?? {});
+
+    // The checkpoint and the projection are one fact in two halves. The feed only ever sends
+    // what is *newer* than the checkpoint, so a checkpoint that has outlived its projection
+    // describes a library the plugin cannot see — and an unseeable library plans no notes, which
+    // used to mean every note the plugin manages was trashed on the next sync.
+    const restored = this.library.restore(data?.projection);
+    if (!restored && this.settings.checkpoint !== "0") {
+      console.warn(
+        "Notable: no saved page text for a checkpoint that has moved — re-reading from the start.",
+      );
+      this.settings.checkpoint = "0";
+    }
   }
 
   async saveSettings(): Promise<void> {
-    await this.saveData(this.settings);
+    // The projection rides with the settings so the two can never be written apart. It holds
+    // only page text, which is already in the vault — nothing here is a second source of truth.
+    await this.saveData({ ...this.settings, projection: this.library.snapshot() });
   }
 
   /** Forgets the checkpoint and reads everything again. The repair for a vault that drifted. */
@@ -140,7 +160,17 @@ export default class NotableHandwritingPlugin extends Plugin {
         if (changes.rows.length === 0) break;
       }
 
-      const written = await this.writeVault();
+      // A sync that knows no page text at all cannot have a correct plan, and the only thing an
+    // empty plan does is delete. Backstop for the case loadSettings cannot repair — a text
+    // database genuinely emptied, a first run against a server scribe has not reached yet.
+    if (this.library.isEmpty) {
+      this.settings.checkpoint = since;
+      await this.saveSettings();
+      if (announce) new Notice("Notable: no recognized text on the server yet.");
+      return;
+    }
+
+    const written = await this.writeVault();
 
       // The checkpoint moves only after the vault write, so a failure part-way through is retried
       // rather than skipped. Rewrites are whole-file and identical, so replaying costs nothing.
