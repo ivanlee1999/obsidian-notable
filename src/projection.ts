@@ -8,6 +8,20 @@ import {
 } from "./model.ts";
 import { notePath, renderNote } from "./render.ts";
 
+/**
+ * The part of the projection that cannot be rebuilt from the library alone.
+ *
+ * Notebooks and folders are re-read whole on every sync, so they never need saving. Page text
+ * does: it arrives through a checkpointed change feed, and once the checkpoint has moved past a
+ * document that document is never sent again. Losing this map therefore loses every page's text
+ * until the checkpoint is reset — see `Library.restore`.
+ */
+export interface LibrarySnapshot {
+  version: 1;
+  texts: PageTextDoc[];
+  pageClocks: Record<string, string>;
+}
+
 /** One note the vault should hold, fully decided. */
 export interface PlannedNote {
   notebookId: string;
@@ -29,6 +43,38 @@ export class Library {
   private texts = new Map<string, PageTextDoc>();
   /** A page's `updatedAt` from its notebook's perspective, for staleness. Absent until known. */
   private pageClocks = new Map<string, string>();
+
+  /**
+   * The text half of the projection, for saving between sessions.
+   *
+   * Only what the feed cannot re-deliver. Notebooks and folders are deliberately left out: they
+   * are re-read in full every sync, so persisting them would only create a second, staler copy.
+   */
+  snapshot(): LibrarySnapshot {
+    return {
+      version: 1,
+      texts: [...this.texts.values()],
+      pageClocks: Object.fromEntries(this.pageClocks),
+    };
+  }
+
+  /**
+   * Restores a saved snapshot. Returns whether anything was actually restored, which is what
+   * lets the caller notice a checkpoint that has outlived its projection.
+   */
+  restore(snapshot: LibrarySnapshot | undefined): boolean {
+    if (!snapshot || snapshot.version !== 1) return false;
+    for (const doc of snapshot.texts ?? []) this.applyText(doc);
+    for (const [pageId, clock] of Object.entries(snapshot.pageClocks ?? {})) {
+      this.pageClocks.set(pageId, clock);
+    }
+    return this.texts.size > 0;
+  }
+
+  /** Whether any page text is known at all. An empty projection can plan nothing. */
+  get isEmpty(): boolean {
+    return this.texts.size === 0;
+  }
 
   applyNotebook(doc: NotebookDoc): void {
     const id = idOf(doc._id);

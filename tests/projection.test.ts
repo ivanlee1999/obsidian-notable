@@ -201,3 +201,60 @@ test("an untitled notebook still gets a usable name", () => {
 
   assert.equal(lib.plan("Handwritten")[0].path, "Handwritten/Untitled.md");
 });
+
+// --- Surviving a restart -------------------------------------------------------------
+//
+// Notebooks and folders are re-read whole on every sync, but page text arrives through a
+// checkpointed feed: once the checkpoint has moved past a document, that document is never
+// sent again. So the text projection has to outlive the process, or the plugin wakes up
+// believing the library has no text at all — and a library with no text plans no notes, which
+// is indistinguishable from "every notebook was deleted".
+
+test("a restored snapshot plans the same notes as the live projection", () => {
+  const before = library();
+  const planBefore = before.plan("Handwritten");
+
+  const after = new Library();
+  // What a restart really looks like: the library documents come back from the server, the
+  // text does not, and only the snapshot can supply it.
+  after.applyNotebook(notebook({ _id: "notebook:book-1" }));
+  const restored = after.restore(before.snapshot());
+
+  assert.equal(restored, true);
+  assert.deepEqual(after.plan("Handwritten"), planBefore);
+});
+
+test("a library with no text plans nothing, which is why the snapshot matters", () => {
+  const starved = new Library();
+  starved.applyNotebook(notebook({ _id: "notebook:book-1" }));
+
+  assert.equal(starved.isEmpty, true);
+  // An empty plan is not "no changes" to the caller — every managed note is stranded by it and
+  // would be trashed. main.ts refuses to write the vault in this state.
+  assert.deepEqual(starved.plan("Handwritten"), []);
+});
+
+test("restore reports failure for a missing or unknown snapshot", () => {
+  const lib = new Library();
+  assert.equal(lib.restore(undefined), false);
+  // A snapshot from a future version is not guessed at; the caller resets the checkpoint and
+  // reads the feed again rather than planning against half-understood data.
+  assert.equal(lib.restore({ version: 2 } as never), false);
+  assert.equal(lib.isEmpty, true);
+});
+
+test("a snapshot round-trips page clocks, so staleness survives a restart too", () => {
+  const before = library();
+  before.notePageClock("page-1", "2026-08-19T04:00:00.000Z");
+
+  const after = new Library();
+  after.applyNotebook(notebook({ _id: "notebook:book-1" }));
+  after.restore(before.snapshot());
+
+  // The clock is newer than the recognized text, so the note carries the written-on-since
+  // marker — which it would not if the clocks had been dropped on the way through.
+  assert.match(
+    after.plan("Handwritten")[0].contents,
+    /written on since it was last recognized/i,
+  );
+});
