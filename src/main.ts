@@ -5,9 +5,10 @@ import {
   PluginSettingTab,
   Setting,
   TFile,
+  TFolder,
   normalizePath,
 } from "obsidian";
-import { CouchClient } from "./couch.ts";
+import { CouchClient, CouchReadError } from "./couch.ts";
 import {
   isFolderId,
   isNotebookId,
@@ -17,7 +18,8 @@ import {
   type PageTextDoc,
 } from "./model.ts";
 import { Library, type LibrarySnapshot, type PlannedNote } from "./projection.ts";
-import { MANAGED_BY } from "./render.ts";
+import { fileId, managedIdentity, reservePath, yamlString } from "./render.ts";
+import { organizationSource } from "./organization.ts";
 
 interface Settings {
   url: string;
@@ -34,6 +36,7 @@ interface Settings {
 /** What is stored beside the settings in the plugin's data file. */
 interface PersistedProjection {
   projection?: LibrarySnapshot;
+  projectionSource?: string;
 }
 
 const DEFAULTS: Settings = {
@@ -51,6 +54,7 @@ export default class NotableHandwritingPlugin extends Plugin {
   settings: Settings = { ...DEFAULTS };
   private library = new Library();
   private syncing = false;
+  private projectionSource = "";
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -89,7 +93,13 @@ export default class NotableHandwritingPlugin extends Plugin {
     // what is *newer* than the checkpoint, so a checkpoint that has outlived its projection
     // describes a library the plugin cannot see — and an unseeable library plans no notes, which
     // used to mean every note the plugin manages was trashed on the next sync.
-    const restored = this.library.restore(data?.projection);
+    const source = organizationSource(this.settings.url, this.settings.notesDatabase, this.settings.textDatabase);
+    this.projectionSource = source;
+    let restored = false;
+    if (data?.projectionSource === source) {
+      try { restored = this.library.restore(data?.projection); }
+      catch (error) { console.warn("Notable: invalid cached metadata; re-reading without changing vault files.", error); }
+    }
     if (!restored && this.settings.checkpoint !== "0") {
       console.warn(
         "Notable: no saved page text for a checkpoint that has moved — re-reading from the start.",
@@ -101,13 +111,13 @@ export default class NotableHandwritingPlugin extends Plugin {
   async saveSettings(): Promise<void> {
     // The projection rides with the settings so the two can never be written apart. It holds
     // only page text, which is already in the vault — nothing here is a second source of truth.
-    await this.saveData({ ...this.settings, projection: this.library.snapshot() });
+    await this.saveData({ ...this.settings, projection: this.library.snapshot(), projectionSource: this.projectionSource });
   }
 
   /** Forgets the checkpoint and reads everything again. The repair for a vault that drifted. */
   async rebuild(): Promise<void> {
     this.settings.checkpoint = "0";
-    this.library = new Library();
+    // Keep the known metadata/text until the replacement read succeeds.
     await this.saveSettings();
     await this.sync(true);
   }
@@ -127,38 +137,52 @@ export default class NotableHandwritingPlugin extends Plugin {
 
     this.syncing = true;
     try {
-      const client = new CouchClient(this.settings);
+      const settings = { ...this.settings };
+      const source = organizationSource(settings.url, settings.notesDatabase, settings.textDatabase);
+      const next = new Library();
+      const sameSource = this.projectionSource === source;
+      if (sameSource) next.restore(this.library.snapshot());
+      const client = new CouchClient(settings);
+      const organization = await client.allWithPrefix<unknown>(`${settings.notesDatabase}_organization`, "journal:");
+      next.applyOrganizationSnapshot(organization);
 
       // The library is re-read whole each sync rather than followed as a feed. It is small — one
       // document per notebook and folder — and reading it fresh means a note lands in the right
       // place after a move even if the move itself was never seen.
       const notebooks = await client.allWithPrefix<NotebookDoc>(
-        this.settings.notesDatabase,
+        settings.notesDatabase,
         "notebook:",
       );
       const folders = await client.allWithPrefix<FolderDoc>(
-        this.settings.notesDatabase,
+        settings.notesDatabase,
         "folder:",
       );
-      for (const folder of folders) if (isFolderId(folder._id)) this.library.applyFolder(folder);
-      for (const notebook of notebooks) {
-        if (isNotebookId(notebook._id)) this.library.applyNotebook(notebook);
-      }
+      next.replaceLibrary(notebooks, folders);
 
       let changed = 0;
-      let since = this.settings.checkpoint;
+      let since = sameSource ? this.settings.checkpoint : "0";
       // Drained in pages: a first sync against an established library is thousands of documents,
       // and asking for them in one response is how a plugin gets killed for memory.
       for (;;) {
-        const changes = await client.changes<PageTextDoc>(this.settings.textDatabase, since);
+        let changes;
+        try { changes = await client.changes<PageTextDoc>(settings.textDatabase, since); }
+        catch (error) {
+          if (error instanceof CouchReadError && error.status === 404) break;
+          throw error;
+        }
         for (const row of changes.rows) {
           if (!isPageTextId(row.id)) continue;
-          this.library.applyText(row.doc ?? { _id: row.id, _deleted: true });
+          next.applyText(row.doc ?? { _id: row.id, _deleted: true });
           changed += 1;
         }
         since = changes.lastSeq;
         if (changes.rows.length === 0) break;
       }
+
+      if (source !== organizationSource(this.settings.url, this.settings.notesDatabase, this.settings.textDatabase) ||
+        settings.folder !== this.settings.folder) return;
+      this.library = next;
+      this.projectionSource = source;
 
       // A sync that knows no page text at all cannot have a correct plan, and the only thing an
     // empty plan does is delete. Backstop for the case loadSettings cannot repair — a text
@@ -187,7 +211,8 @@ export default class NotableHandwritingPlugin extends Plugin {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error("Notable handwriting sync failed", error);
-      if (announce) new Notice(`Notable: ${message}`);
+      // A failed metadata read must be visible even on a background check.
+      new Notice(`Notable: ${message} Journal sync requires ${this.settings.notesDatabase}_organization.`);
     } finally {
       this.syncing = false;
     }
@@ -196,7 +221,15 @@ export default class NotableHandwritingPlugin extends Plugin {
   /** Brings the vault in line with the plan, and returns how many notes actually changed. */
   private async writeVault(): Promise<number> {
     const root = normalizePath(this.settings.folder);
-    const planned = this.library.plan(root);
+    if (!root || root === "." || root.startsWith("/") || root.split("/").includes("..")) throw new Error("Choose a dedicated notes folder.");
+    const source = fileId(this.projectionSource);
+    const owned = new Map<string, string | null>();
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      if (file.path.startsWith(`${root}/`)) owned.set(file.path, managedIdentity(await this.app.vault.read(file), source));
+    }
+    const occupied = new Map(owned);
+    const planned = this.library.plan(root, (path, identity) => reservePath(normalizePath(path), identity, occupied));
+    for (const note of planned) note.contents = note.contents.replace(/^---\n/, `---\nnotable-source: ${yamlString(source)}\n`);
 
     let written = 0;
     const plannedPaths = new Set<string>();
@@ -204,10 +237,20 @@ export default class NotableHandwritingPlugin extends Plugin {
     for (const note of planned) {
       const path = normalizePath(note.path);
       plannedPaths.add(path);
-      if (await this.writeNote(path, note)) written += 1;
+      if (await this.writeNote(path, note, owned, source)) written += 1;
     }
 
-    await this.removeStrandedNotes(root, plannedPaths);
+    const identities = new Set(planned.map(note => JSON.stringify([note.kind ?? "notebook", note.notebookId])));
+    for (const [path, identity] of owned) {
+      if (!identity || plannedPaths.has(path)) continue;
+      const [kind, id] = JSON.parse(identity) as string[];
+      // Absence is not a deletion: keep note files when ink has not arrived or a library was reset.
+      if (kind === "notebook" && !identities.has(identity) && !this.library.isTrashed(id)) continue;
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (file instanceof TFile && managedIdentity(await this.app.vault.read(file), source) === identity) {
+        await this.app.vault.trash(file, true);
+      }
+    }
     return written;
   }
 
@@ -218,10 +261,15 @@ export default class NotableHandwritingPlugin extends Plugin {
    * becomes a rename in the vault — links to it survive, which they would not if the old note
    * were deleted and a new one created beside it.
    */
-  private async writeNote(path: string, note: PlannedNote): Promise<boolean> {
-    const existing = this.findManagedNote(note.notebookId);
+  private async writeNote(path: string, note: PlannedNote, owned: Map<string, string | null>, source: string): Promise<boolean> {
+    const identity = JSON.stringify([note.kind ?? "notebook", note.notebookId]);
+    const existingPath = [...owned].find(([, owner]) => owner === identity)?.[0];
+    const existing = existingPath ? this.app.vault.getAbstractFileByPath(existingPath) : null;
 
-    if (existing && existing.path !== path) {
+    if (existing instanceof TFile && existing.path !== path) {
+      if (managedIdentity(await this.app.vault.read(existing), source) !== identity || this.app.vault.getAbstractFileByPath(path)) {
+        throw new Error("A note changed during sync; retrying will preserve both files.");
+      }
       await this.ensureFolder(path);
       await this.app.fileManager.renameFile(existing, path);
     }
@@ -230,12 +278,7 @@ export default class NotableHandwritingPlugin extends Plugin {
     if (file instanceof TFile) {
       const current = await this.app.vault.read(file);
       if (current === note.contents) return false;
-      if (!this.isManaged(current)) {
-        // Someone took this note into their own keeping, or a file happens to share the name.
-        // Either way it is not the plugin's to overwrite.
-        console.warn(`Notable: leaving unmanaged file alone: ${path}`);
-        return false;
-      }
+      if (managedIdentity(current, source) !== identity) throw new Error("A file changed during sync; existing content was preserved.");
       await this.app.vault.modify(file, note.contents);
       return true;
     }
@@ -245,69 +288,16 @@ export default class NotableHandwritingPlugin extends Plugin {
     return true;
   }
 
-  /**
-   * Deletes notes this plugin wrote that the plan no longer contains — a notebook trashed,
-   * emptied, or gone. Only ever files carrying the marker, and only inside the plugin's folder.
-   */
-  private async removeStrandedNotes(root: string, planned: Set<string>): Promise<void> {
-    for (const file of this.managedNotes(root)) {
-      if (planned.has(file.path)) continue;
-      // Into the system trash rather than deleted outright: this is the one destructive thing the
-      // plugin does, and the ink it came from living on another device is no comfort if the
-      // reader had added to the note here.
-      await this.app.vault.trash(file, true);
-    }
-  }
-
-  /** Every note in the plugin's folder that carries its marker. */
-  private managedNotes(root: string): TFile[] {
-    const prefix = `${root}/`;
-    return this.app.vault
-      .getMarkdownFiles()
-      .filter((file) => file.path === root || file.path.startsWith(prefix))
-      .filter((file) => {
-        const cache = this.app.metadataCache.getFileCache(file);
-        return cache?.frontmatter?.["managed-by"] === MANAGED_BY;
-      });
-  }
-
-  private findManagedNote(notebookId: string): TFile | null {
-    for (const file of this.app.vault.getMarkdownFiles()) {
-      const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
-      if (
-        frontmatter?.["managed-by"] === MANAGED_BY &&
-        frontmatter?.["notable-id"] === notebookId
-      ) {
-        return file;
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Whether a file's own text says the plugin owns it.
-   *
-   * Read from the raw contents rather than the metadata cache: a file created moments ago may not
-   * be in the cache yet, and treating "not cached" as "not managed" would leave the plugin unable
-   * to update the note it just wrote.
-   */
-  private isManaged(contents: string): boolean {
-    const end = contents.indexOf("\n---", 4);
-    if (!contents.startsWith("---") || end <= 0) return false;
-    // Quoted or not: the plugin writes it quoted, but a note that has been through another tool's
-    // frontmatter handling may come back bare, and that is not a reason to abandon it.
-    return new RegExp(`^managed-by:\\s*["']?${MANAGED_BY}["']?\\s*$`, "m").test(
-      contents.slice(0, end),
-    );
-  }
-
   private async ensureFolder(path: string): Promise<void> {
     const parent = path.slice(0, path.lastIndexOf("/"));
-    if (!parent || this.app.vault.getAbstractFileByPath(parent)) return;
+    if (!parent) return;
+    const existing = this.app.vault.getAbstractFileByPath(parent);
+    if (existing instanceof TFolder) return;
+    if (existing) throw new Error(`A file occupies the notes folder ${parent}.`);
     try {
       await this.app.vault.createFolder(parent);
-    } catch {
-      // Already there — two notes in the same new folder race for it, and losing is fine.
+    } catch (error) {
+      if (!(this.app.vault.getAbstractFileByPath(parent) instanceof TFolder)) throw error;
     }
   }
 }
@@ -397,14 +387,15 @@ class NotableSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Connection")
-      .setDesc("Checks that both databases are reachable with these credentials.")
+      .setDesc("Checks the ink, recognized text, and journal organization databases.")
       .addButton((button) =>
         button.setButtonText("Test").onClick(async () => {
           const client = new CouchClient(this.plugin.settings);
           try {
             await client.ping(this.plugin.settings.notesDatabase);
             await client.ping(this.plugin.settings.textDatabase);
-            new Notice("Notable: both databases are reachable.");
+            await client.ping(`${this.plugin.settings.notesDatabase}_organization`);
+            new Notice("Notable: all databases are reachable.");
           } catch (error) {
             new Notice(`Notable: ${error instanceof Error ? error.message : String(error)}`);
           }

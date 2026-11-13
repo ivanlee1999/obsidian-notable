@@ -73,11 +73,11 @@ test("a notebook nested below a trashed folder is hidden too", () => {
   assert.deepEqual(lib.plan("Handwritten"), []);
 });
 
-test("a notebook whose parent folder is gone entirely is hidden", () => {
+test("a notebook whose parent has not arrived remains available", () => {
   const lib = library();
   lib.applyNotebook(notebook({ _id: "notebook:book-1", parentFolderId: "vanished" }));
 
-  assert.deepEqual(lib.plan("Handwritten"), []);
+  assert.equal(lib.plan("Handwritten").length, 1);
 });
 
 test("a cycle in the folder chain does not hang the sync", () => {

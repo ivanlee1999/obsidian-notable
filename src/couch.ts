@@ -18,6 +18,10 @@ export interface Changes<T> {
   rows: ChangeRow<T>[];
 }
 
+export class CouchReadError extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
+}
+
 /**
  * The slice of CouchDB's HTTP API this plugin needs — reads only.
  *
@@ -75,7 +79,7 @@ export class CouchClient {
 
     const response = await requestUrl({ url, headers: this.headers, throw: false });
     if (response.status >= 400) {
-      throw new Error(`Reading changes from "${database}" failed with ${response.status}.`);
+      throw new CouchReadError(response.status, `Reading changes from "${database}" failed with ${response.status}.`);
     }
 
     const body = response.json as {
@@ -113,7 +117,10 @@ export class CouchClient {
       throw new Error(`Reading "${prefix}" documents failed with ${response.status}.`);
     }
 
-    const body = response.json as { rows?: { doc?: T }[] };
-    return (body.rows ?? []).map((row) => row.doc).filter((doc): doc is T => Boolean(doc));
+    const body = response.json as { rows?: { doc?: T; error?: string }[]; total_rows?: number; offset?: number };
+    if (!Array.isArray(body.rows) || body.rows.some(row => !row || row.error || !row.doc)) {
+      throw new Error(`Incomplete "${prefix}" snapshot; existing notes were preserved.`);
+    }
+    return body.rows.map(row => row.doc as T);
   }
 }

@@ -2,6 +2,7 @@ import type { PageEntry } from "./model.ts";
 
 /** What the plugin stamps on every note it owns. Nothing without this is ever touched. */
 export const MANAGED_BY = "notable-handwriting";
+export type ManagedKind = "notebook" | "day" | "topic";
 
 export interface NoteInput {
   notebookId: string;
@@ -9,6 +10,8 @@ export interface NoteInput {
   createdAt?: string;
   updatedAt?: string;
   pages: PageEntry[];
+  journalDate?: string | null;
+  topics?: string[];
 }
 
 /**
@@ -24,6 +27,8 @@ export function renderNote(input: NoteInput): string {
     `title: ${yamlString(input.title)}`,
     ...(input.createdAt ? [`created: ${yamlString(input.createdAt)}`] : []),
     ...(input.updatedAt ? [`updated: ${yamlString(input.updatedAt)}`] : []),
+    ...(input.journalDate ? [`journal-date: ${yamlString(input.journalDate)}`] : []),
+    ...(input.topics ? [`topics: [${input.topics.map(yamlString).join(", ")}]`] : []),
     `notable-id: ${yamlString(input.notebookId)}`,
     // The marker that makes this note the plugin's to overwrite, and the id that lets a rename be
     // a rename. Removing either by hand is how a reader takes a note back into their own keeping.
@@ -64,7 +69,60 @@ function renderPage(page: PageEntry): string {
  * broken property.
  */
 export function yamlString(value: string): string {
-  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  return JSON.stringify(value).replace(/[\u0085\u2028\u2029]/g,
+    character => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+/** Short filenames on desktop and mobile; full identities still guard every collision/write. */
+export function fileId(value: string): string {
+  let a = 2166136261, b = 3339675911;
+  for (const byte of new TextEncoder().encode(value)) {
+    a = Math.imul(a ^ byte, 16777619);
+    b = Math.imul(b ^ byte, 2246822519);
+  }
+  return (a >>> 0).toString(16).padStart(8, "0") + (b >>> 0).toString(16).padStart(8, "0");
+}
+
+export function renderIndex(kind: "day" | "topic", id: string, title: string, lines: string[]): string {
+  return ["---", `title: ${yamlString(title)}`, `notable-id: ${yamlString(id)}`,
+    `managed-kind: ${yamlString(kind)}`, `managed-by: ${yamlString(MANAGED_BY)}`, "---", "", ...lines, ""].join("\n");
+}
+
+/** Read identity from the file itself, including freshly written files not yet in Obsidian's cache. */
+export function managedIdentity(contents: string, source?: string): string | null {
+  contents = contents.replace(/\r\n/g, "\n");
+  if (!contents.startsWith("---\n")) return null;
+  const end = contents.indexOf("\n---", 4);
+  if (end < 0) return null;
+  const fields = new Map<string, string>();
+  for (const line of contents.slice(4, end).split("\n")) {
+    const match = /^([a-z-]+):\s*(.*?)\s*$/.exec(line);
+    if (!match) continue;
+    let value = match[2];
+    if (value.startsWith('"')) {
+      try { value = JSON.parse(value) as string; } catch { return null; }
+    } else if (value.startsWith("'") && value.endsWith("'")) value = value.slice(1, -1).replace(/''/g, "'");
+    if (fields.has(match[1])) return null;
+    fields.set(match[1], value);
+  }
+  if (fields.get("managed-by") !== MANAGED_BY || !fields.get("notable-id")) return null;
+  if (source && fields.has("notable-source") && fields.get("notable-source") !== source) return null;
+  const kind = fields.get("managed-kind") ?? "notebook";
+  if (!["notebook", "day", "topic"].includes(kind)) return null;
+  return JSON.stringify([kind, fields.get("notable-id")]);
+}
+
+/** Reserve paths before generating index links, so manual files and sanitized-name collisions survive. */
+export function reservePath(path: string, identity: string, occupied: Map<string, string | null>): string {
+  let candidate = path;
+  const suffix = fileId(identity);
+  let attempt = 0;
+  while (occupied.has(candidate) && occupied.get(candidate) !== identity) {
+    candidate = `${path.slice(0, -3)} ~${suffix}${attempt ? `-${attempt}` : ""}.md`;
+    attempt++;
+  }
+  occupied.set(candidate, identity);
+  return candidate;
 }
 
 /**

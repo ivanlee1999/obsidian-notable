@@ -6,7 +6,8 @@ import {
   type PageEntry,
   type PageTextDoc,
 } from "./model.ts";
-import { notePath, renderNote } from "./render.ts";
+import { fileId, notePath, renderIndex, renderNote, type ManagedKind } from "./render.ts";
+import { mergeOrganization, organizationSnapshot, type OrganizationDoc } from "./organization.ts";
 
 /**
  * The part of the projection that cannot be rebuilt from the library alone.
@@ -20,6 +21,7 @@ export interface LibrarySnapshot {
   version: 1;
   texts: PageTextDoc[];
   pageClocks: Record<string, string>;
+  organization?: OrganizationDoc[];
 }
 
 /** One note the vault should hold, fully decided. */
@@ -27,6 +29,7 @@ export interface PlannedNote {
   notebookId: string;
   path: string;
   contents: string;
+  kind?: ManagedKind;
 }
 
 /**
@@ -41,6 +44,7 @@ export class Library {
   private notebooks = new Map<string, NotebookDoc>();
   private folders = new Map<string, FolderDoc>();
   private texts = new Map<string, PageTextDoc>();
+  private organization = new Map<string, OrganizationDoc>();
   /** A page's `updatedAt` from its notebook's perspective, for staleness. Absent until known. */
   private pageClocks = new Map<string, string>();
 
@@ -55,6 +59,7 @@ export class Library {
       version: 1,
       texts: [...this.texts.values()],
       pageClocks: Object.fromEntries(this.pageClocks),
+      organization: [...this.organization.values()],
     };
   }
 
@@ -64,16 +69,34 @@ export class Library {
    */
   restore(snapshot: LibrarySnapshot | undefined): boolean {
     if (!snapshot || snapshot.version !== 1) return false;
+    this.applyOrganizationSnapshot(snapshot.organization ?? []);
     for (const doc of snapshot.texts ?? []) this.applyText(doc);
     for (const [pageId, clock] of Object.entries(snapshot.pageClocks ?? {})) {
       this.pageClocks.set(pageId, clock);
     }
-    return this.texts.size > 0;
+    return !this.isEmpty;
   }
 
   /** Whether any page text is known at all. An empty projection can plan nothing. */
   get isEmpty(): boolean {
-    return this.texts.size === 0;
+    return this.texts.size === 0 && this.organization.size === 0;
+  }
+
+  applyOrganizationSnapshot(values: unknown[]): void {
+    const records = organizationSnapshot(values);
+    for (const record of records) {
+      const previous = this.organization.get(record.notebookId);
+      this.organization.set(record.notebookId, previous ? mergeOrganization(previous, record) : record);
+    }
+  }
+
+  replaceLibrary(notebooks: NotebookDoc[], folders: FolderDoc[]): void {
+    if (notebooks.some(doc => !doc || typeof doc._id !== "string" || !doc._id.startsWith("notebook:")) ||
+      folders.some(doc => !doc || typeof doc._id !== "string" || !doc._id.startsWith("folder:"))) {
+      throw new Error("Invalid notebook snapshot; existing notes were preserved.");
+    }
+    this.notebooks = new Map(notebooks.filter(doc => !doc._deleted).map(doc => [idOf(doc._id), doc]));
+    this.folders = new Map(folders.filter(doc => !doc._deleted).map(doc => [idOf(doc._id), doc]));
   }
 
   applyNotebook(doc: NotebookDoc): void {
@@ -109,6 +132,11 @@ export class Library {
     return [...this.notebooks.values()].filter((notebook) => !this.isHidden(notebook));
   }
 
+  isTrashed(notebookId: string): boolean {
+    const notebook = this.notebooks.get(notebookId);
+    return Boolean(notebook && this.isHidden(notebook));
+  }
+
   /** Every page id any live notebook still lists — what text is allowed to exist for. */
   livePageIds(): Set<string> {
     const ids = new Set<string>();
@@ -139,8 +167,8 @@ export class Library {
     let parentId = notebook.parentFolderId ?? null;
     for (let depth = 0; parentId && depth < 64; depth += 1) {
       const folder = this.folders.get(parentId);
-      // A parent that is not here at all has been deleted outright: its contents go with it.
-      if (!folder) return true;
+      // A missing parent may not have arrived yet. Keep orphaned ink available like Notable.
+      if (!folder) return false;
       if (folder.deletedAt) return true;
       parentId = folder.parentFolderId ?? null;
     }
@@ -150,8 +178,11 @@ export class Library {
   /** A notebook's folder titles, outermost first. */
   private folderPath(notebook: NotebookDoc): string[] {
     const path: string[] = [];
+    const seen = new Set<string>();
     let parentId = notebook.parentFolderId ?? null;
     for (let depth = 0; parentId && depth < 64; depth += 1) {
+      if (seen.has(parentId)) break;
+      seen.add(parentId);
       const folder = this.folders.get(parentId);
       if (!folder) break;
       path.unshift(folder.title ?? "Untitled folder");
@@ -185,7 +216,7 @@ export class Library {
    * recognized yet" from end to end is noise, and it appears the moment the plugin is pointed at
    * a library whose pages have never been read.
    */
-  plan(root: string): PlannedNote[] {
+  plan(root: string, resolvePath: (path: string, identity: string) => string = path => path): PlannedNote[] {
     const notebooks = this.liveNotebooks();
 
     // Which titles more than one notebook wants, so only genuine collisions take an id suffix.
@@ -198,24 +229,64 @@ export class Library {
     const planned: PlannedNote[] = [];
     for (const notebook of notebooks) {
       const pages = this.pages(notebook);
-      if (!pages.some((page) => page.text !== null)) continue;
-
       const notebookId = idOf(notebook._id);
+      const organization = this.organization.get(notebookId);
+      if (!organization && !pages.some((page) => page.text !== null)) continue;
       const folderPath = this.folderPath(notebook);
       const title = notebook.title?.trim() || "Untitled";
       const key = `${folderPath.join("/")}/${notebook.title ?? ""}`;
 
       planned.push({
         notebookId,
-        path: notePath(root, folderPath, title, notebookId, (titleCounts.get(key) ?? 0) > 1),
+        path: resolvePath(organization
+          ? `${root}/Entries/${fileId(notebookId)}.md`
+          : notePath(root, folderPath, title, notebookId, (titleCounts.get(key) ?? 0) > 1),
+          JSON.stringify(["notebook", notebookId])),
         contents: renderNote({
           notebookId,
           title,
           createdAt: notebook.createdAt,
           updatedAt: notebook.updatedAt,
           pages,
+          ...(organization ? { journalDate: organization.date,
+            topics: Object.keys(organization.topics).sort().filter(key => organization.topics[key].present)
+              .map(key => organization.topics[key].name) } : {}),
         }),
       });
+    }
+    const days = new Map<string, PlannedNote[]>();
+    const topics = new Map<string, { name: string; notes: PlannedNote[] }>();
+    for (const note of planned) {
+      const organization = this.organization.get(note.notebookId);
+      if (!organization) continue;
+      if (organization.date) days.set(organization.date, [...(days.get(organization.date) ?? []), note]);
+      for (const [key, state] of Object.entries(organization.topics)) {
+        if (!state.present) continue;
+        const topic = topics.get(key) ?? { name: state.name, notes: [] };
+        topic.notes.push(note);
+        topics.set(key, topic);
+      }
+    }
+    const link = (note: PlannedNote, indexPath: string): string => {
+      const title = this.notebooks.get(note.notebookId)?.title || "Untitled";
+      const from = indexPath.split("/").slice(0, -1), to = note.path.split("/");
+      while (from.length && to.length && from[0] === to[0]) { from.shift(); to.shift(); }
+      const relative = [...from.map(() => ".."), ...to].map(encodeURIComponent).join("/");
+      const label = title.replace(/[\r\n]/g, " ").replace(/[\\\[\]<>`*_]/g, "\\$&");
+      return `- [${label}](<${relative}>)`;
+    };
+    const chronological = (notes: PlannedNote[], direction = 1): PlannedNote[] => [...notes].sort((a, b) =>
+      direction * (this.organization.get(a.notebookId)!.createdAt - this.organization.get(b.notebookId)!.createdAt) ||
+      (a.notebookId < b.notebookId ? -1 : a.notebookId > b.notebookId ? 1 : 0));
+    for (const [date, notes] of [...days].sort(([a], [b]) => a.localeCompare(b))) {
+      const path = resolvePath(`${root}/Journal/${date}.md`, JSON.stringify(["day", date]));
+      planned.push({ notebookId: date, kind: "day",
+        path, contents: renderIndex("day", date, date, chronological(notes).map(note => link(note, path))) });
+    }
+    for (const [key, topic] of [...topics].sort(([a], [b]) => a.localeCompare(b))) {
+      const path = resolvePath(`${root}/Topics/${fileId(key)}.md`, JSON.stringify(["topic", key]));
+      planned.push({ notebookId: key, kind: "topic",
+        path, contents: renderIndex("topic", key, topic.name, chronological(topic.notes, -1).map(note => link(note, path))) });
     }
     return planned;
   }
