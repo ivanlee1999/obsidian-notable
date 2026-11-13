@@ -27,6 +27,15 @@ test("typed source, handwriting and previous versions remain distinct and keep t
   assert.doesNotMatch(typed, /Not recognized|No handwriting|### Handwriting/);
 });
 
+test("canonical Markdown indentation is retained and unclosed recovered fences cannot absorb later versions", () => {
+  const source = "    an indented code block  \n\nParagraph with trailing spaces  \n";
+  const note = renderNote({ notebookId: "b", title: "Typed", pages: [page({ text: null,
+    flowText: source, previousText: ["```\nunclosed code", "a later version"] })] });
+  assert.ok(note.includes(source));
+  assert.match(note, /````markdown\n```\nunclosed code\n````/);
+  assert.match(note, /```markdown\na later version\n```/);
+});
+
 test("a note carries the marker that makes it the plugin's to overwrite", () => {
   const note = renderNote({ notebookId: "book-1", title: "Groceries", pages: [page()] });
 

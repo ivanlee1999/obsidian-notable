@@ -62,9 +62,16 @@ function renderPage(page: PageEntry, sideBySide: boolean): string {
   const content = (text: string) => `${heading}\n\n${sideBySide && image ? `${image}\n\n` : ""}${text}${!sideBySide && image ? `\n\n${image}` : ""}`;
 
   if (page.flowText != null || page.previousText?.length) {
-    const parts = page.flowText?.trim() ? [page.flowText.trim()] : [];
+    const parts = page.flowText != null ? [page.flowText] : [];
     if (page.text?.trim()) parts.push(`### Handwriting\n\n${page.text.trim()}`);
-    if (page.previousText?.length) parts.push(`<details>\n<summary>Previous text versions</summary>\n\n${page.previousText.join("\n\n---\n\n")}\n\n</details>`);
+    if (page.previousText?.length) {
+      const sources = page.previousText.map(source => {
+        const longestFence = (source.match(/`+/g) ?? []).reduce((length, run) => Math.max(length, run.length), 2);
+        const fence = "`".repeat(longestFence + 1);
+        return `${fence}markdown\n${source}${source.endsWith("\n") ? "" : "\n"}${fence}`;
+      });
+      parts.push(`<details>\n<summary>Previous text versions</summary>\n\n${sources.join("\n\n")}\n\n</details>`);
+    }
     return content(parts.join("\n\n"));
   }
 

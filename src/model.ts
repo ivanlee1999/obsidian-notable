@@ -102,7 +102,8 @@ export function flowingText(page: PageContentDoc): { text: string | null; versio
   const blocks = live.filter(block => (block.kind ?? "md") === "md" && typeof block.text === "string" &&
     (block.x == null || block.y == null)).sort((a, b) =>
       byteOrder(a.orderKey ?? "", b.orderKey ?? "") || byteOrder(a.id, b.id));
-  const current = new Set(blocks.map(block => block.text!));
+  const current = new Set(live.filter(block => (block.kind ?? "md") === "md" && typeof block.text === "string")
+    .map(block => block.text!));
   return { text: blocks.length ? blocks.map(block => block.text).join("\n\n") : null,
     versions: [...new Set(live.filter(block => block.kind === "text-version" &&
       typeof block.text === "string" && !current.has(block.text))
