@@ -54,15 +54,20 @@ const DEFAULTS: Settings = {
   checkpoint: "0",
 };
 
+class SyncStopped extends Error {}
+
 export default class NotableHandwritingPlugin extends Plugin {
   settings: Settings = { ...DEFAULTS };
   private library = new Library();
   private syncing = false;
   private projectionSource = "";
   private lastFailure: string | null = null;
+  private disposed = false;
 
   async onload(): Promise<void> {
+    this.disposed = false;
     await this.loadSettings();
+    if (this.disposed) return;
     this.addSettingTab(new NotableSettingTab(this.app, this));
 
     this.addCommand({
@@ -80,6 +85,7 @@ export default class NotableHandwritingPlugin extends Plugin {
     // Not in onload's critical path: a server that is slow or away would hold up Obsidian's
     // startup for everything else the user actually asked for.
     this.app.workspace.onLayoutReady(() => {
+      if (this.disposed) return;
       void this.sync(false);
       this.registerInterval(
         window.setInterval(
@@ -89,6 +95,8 @@ export default class NotableHandwritingPlugin extends Plugin {
       );
     });
   }
+
+  onunload(): void { this.disposed = true; }
 
   async loadSettings(): Promise<void> {
     const data = (await this.loadData()) as (Partial<Settings> & PersistedProjection) | null;
@@ -114,6 +122,7 @@ export default class NotableHandwritingPlugin extends Plugin {
   }
 
   async saveSettings(): Promise<void> {
+    if (this.disposed) return;
     // The projection rides with the settings so the two can never be written apart. It holds
     // only page text, which is already in the vault — nothing here is a second source of truth.
     await this.saveData({ ...this.settings, projection: this.library.snapshot(), projectionSource: this.projectionSource });
@@ -121,6 +130,7 @@ export default class NotableHandwritingPlugin extends Plugin {
 
   /** Forgets the checkpoint and reads everything again. The repair for a vault that drifted. */
   async rebuild(): Promise<void> {
+    if (this.disposed) return;
     this.settings.checkpoint = "0";
     // Keep the known metadata/text until the replacement read succeeds.
     await this.saveSettings();
@@ -134,15 +144,19 @@ export default class NotableHandwritingPlugin extends Plugin {
    * put a notice on screen every few minutes to say that nothing happened.
    */
   async sync(announce: boolean): Promise<void> {
-    if (this.syncing) return;
+    if (this.disposed || this.syncing) return;
     if (!this.settings.url) {
       if (announce) new Notice("Notable: set a CouchDB server in the plugin settings first.");
       return;
     }
 
     this.syncing = true;
+    const settings = { ...this.settings };
+    const obsolete = () => this.disposed ||
+      (["url", "username", "password", "notesDatabase", "textDatabase", "imagesDatabase", "folder", "sideBySide"] as const)
+        .some(key => settings[key] !== this.settings[key]);
+    const current = () => { if (obsolete()) throw new SyncStopped(); };
     try {
-      const settings = { ...this.settings };
       const source = organizationSource(settings.url, settings.notesDatabase, settings.textDatabase);
       const next = new Library();
       const sameSource = this.projectionSource === source;
@@ -154,6 +168,7 @@ export default class NotableHandwritingPlugin extends Plugin {
         throw new Error(`Cannot read ${settings.notesDatabase}_organization. Check its provisioning and access. ` +
           (error instanceof Error ? error.message : String(error)));
       }
+      current();
       next.applyOrganizationSnapshot(organization);
 
       // The library is re-read whole each sync rather than followed as a feed. It is small — one
@@ -163,10 +178,12 @@ export default class NotableHandwritingPlugin extends Plugin {
         settings.notesDatabase,
         "notebook:",
       );
+      current();
       const folders = await client.allWithPrefix<FolderDoc>(
         settings.notesDatabase,
         "folder:",
       );
+      current();
       next.replaceLibrary(notebooks, folders);
 
       let changed = 0;
@@ -180,6 +197,7 @@ export default class NotableHandwritingPlugin extends Plugin {
           if (error instanceof CouchReadError && error.status === 404) break;
           throw error;
         }
+        current();
         for (const row of changes.rows) {
           if (!isPageTextId(row.id)) continue;
           next.applyText(row.doc ?? { _id: row.id, _deleted: true });
@@ -189,12 +207,9 @@ export default class NotableHandwritingPlugin extends Plugin {
         if (changes.rows.length === 0) break;
       }
 
-      await this.syncInk(client, settings, next);
+      await this.syncInk(client, settings, next, current);
+      current();
       next.setSideBySide(settings.sideBySide);
-
-      if (source !== organizationSource(this.settings.url, this.settings.notesDatabase, this.settings.textDatabase) ||
-        settings.folder !== this.settings.folder || settings.imagesDatabase !== this.settings.imagesDatabase ||
-        settings.sideBySide !== this.settings.sideBySide) return;
       this.library = next;
       this.projectionSource = source;
       this.lastFailure = null;
@@ -205,16 +220,19 @@ export default class NotableHandwritingPlugin extends Plugin {
     if (this.library.isEmpty) {
       this.settings.checkpoint = since;
       await this.saveSettings();
+      current();
       if (announce) new Notice("Notable: no recognized text on the server yet.");
       return;
     }
 
-    const written = await this.writeVault();
+    const written = await this.writeVault(current);
+    current();
 
       // The checkpoint moves only after the vault write, so a failure part-way through is retried
       // rather than skipped. Rewrites are whole-file and identical, so replaying costs nothing.
       this.settings.checkpoint = since;
       await this.saveSettings();
+      current();
 
       if (announce) {
         new Notice(
@@ -224,6 +242,7 @@ export default class NotableHandwritingPlugin extends Plugin {
         );
       }
     } catch (error) {
+      if (obsolete() || error instanceof SyncStopped) return;
       const message = error instanceof Error ? error.message : String(error);
       console.error("Notable handwriting sync failed", error);
       // Show a background failure once; keep manual retries explicit without repeated timer notices.
@@ -234,13 +253,15 @@ export default class NotableHandwritingPlugin extends Plugin {
     }
   }
 
-  private async syncInk(client: CouchClient, settings: Settings, library: Library): Promise<void> {
+  private async syncInk(client: CouchClient, settings: Settings, library: Library, current: () => void): Promise<void> {
+    current();
     const root = normalizePath(settings.folder);
     if (!root || root === "." || root.startsWith("/") || root.split("/").includes("..")) throw new Error("Choose a dedicated notes folder.");
     library.setInkSource(JSON.stringify([settings.url.replace(/\/+$/, ""), settings.imagesDatabase, root]));
     if (!settings.imagesDatabase) return;
     // Read the complete image manifest before replacing notes. An outage must not remove embeds.
     const images = await client.allWithPrefix<PageImageDoc>(settings.imagesDatabase, "pageimage:");
+    current();
     for (const image of images) {
       const pageId = image.pageId ?? idOf(image._id);
       const attachment = image._attachments?.["page.png"];
@@ -256,9 +277,16 @@ export default class NotableHandwritingPlugin extends Plugin {
       if (existing && !(existing instanceof TFile)) throw new Error(`A folder occupies the image path ${path}.`);
       if (!existing) {
         const bytes = await client.attachment(settings.imagesDatabase, image._id, "page.png");
+        current();
         if (attachment.length !== undefined && bytes.byteLength !== attachment.length) throw new Error("Incomplete handwriting image; existing notes were preserved.");
-        await this.ensureFolder(path);
+        const header = new Uint8Array(bytes, 0, Math.min(8, bytes.byteLength));
+        if (![137, 80, 78, 71, 13, 10, 26, 10].every((byte, index) => header[index] === byte)) {
+          throw new Error("Invalid handwriting PNG; existing notes were preserved.");
+        }
+        await this.ensureFolder(path, current);
+        current();
         await this.app.vault.createBinary(path, bytes);
+        current();
       }
       library.noteInkPath(pageId, path);
     }
@@ -266,13 +294,18 @@ export default class NotableHandwritingPlugin extends Plugin {
   }
 
   /** Brings the vault in line with the plan, and returns how many notes actually changed. */
-  private async writeVault(): Promise<number> {
+  private async writeVault(current: () => void): Promise<number> {
+    current();
     const root = normalizePath(this.settings.folder);
     if (!root || root === "." || root.startsWith("/") || root.split("/").includes("..")) throw new Error("Choose a dedicated notes folder.");
     const source = fileId(this.projectionSource);
     const owned = new Map<string, string | null>();
     for (const file of this.app.vault.getMarkdownFiles()) {
-      if (file.path.startsWith(`${root}/`)) owned.set(file.path, managedIdentity(await this.app.vault.read(file), source));
+      if (file.path.startsWith(`${root}/`)) {
+        const contents = await this.app.vault.read(file);
+        current();
+        owned.set(file.path, managedIdentity(contents, source));
+      }
     }
     const occupied = new Map(owned);
     const planned = this.library.plan(root, (path, identity) => reservePath(normalizePath(path), identity, occupied));
@@ -284,7 +317,8 @@ export default class NotableHandwritingPlugin extends Plugin {
     for (const note of planned) {
       const path = normalizePath(note.path);
       plannedPaths.add(path);
-      if (await this.writeNote(path, note, owned, source)) written += 1;
+      if (await this.writeNote(path, note, owned, source, current)) written += 1;
+      current();
     }
 
     const identities = new Set(planned.map(note => JSON.stringify([note.kind ?? "notebook", note.notebookId])));
@@ -295,7 +329,9 @@ export default class NotableHandwritingPlugin extends Plugin {
       if (kind === "notebook" && !identities.has(identity) && !this.library.isTrashed(id)) continue;
       const file = this.app.vault.getAbstractFileByPath(path);
       if (file instanceof TFile && managedIdentity(await this.app.vault.read(file), source) === identity) {
+        current();
         await this.app.vault.trash(file, true);
+        current();
       }
     }
     return written;
@@ -308,34 +344,42 @@ export default class NotableHandwritingPlugin extends Plugin {
    * becomes a rename in the vault — links to it survive, which they would not if the old note
    * were deleted and a new one created beside it.
    */
-  private async writeNote(path: string, note: PlannedNote, owned: Map<string, string | null>, source: string): Promise<boolean> {
+  private async writeNote(path: string, note: PlannedNote, owned: Map<string, string | null>, source: string, current: () => void): Promise<boolean> {
+    current();
     const identity = JSON.stringify([note.kind ?? "notebook", note.notebookId]);
     const existingPath = [...owned].find(([, owner]) => owner === identity)?.[0];
     const existing = existingPath ? this.app.vault.getAbstractFileByPath(existingPath) : null;
 
     if (existing instanceof TFile && existing.path !== path) {
-      if (managedIdentity(await this.app.vault.read(existing), source) !== identity || this.app.vault.getAbstractFileByPath(path)) {
+      const contents = await this.app.vault.read(existing);
+      current();
+      if (managedIdentity(contents, source) !== identity || this.app.vault.getAbstractFileByPath(path)) {
         throw new Error("A note changed during sync; retrying will preserve both files.");
       }
-      await this.ensureFolder(path);
+      await this.ensureFolder(path, current);
+      current();
       await this.app.fileManager.renameFile(existing, path);
+      current();
     }
 
     const file = this.app.vault.getAbstractFileByPath(path);
     if (file instanceof TFile) {
-      const current = await this.app.vault.read(file);
-      if (current === note.contents) return false;
-      if (managedIdentity(current, source) !== identity) throw new Error("A file changed during sync; existing content was preserved.");
+      const contents = await this.app.vault.read(file);
+      current();
+      if (contents === note.contents) return false;
+      if (managedIdentity(contents, source) !== identity) throw new Error("A file changed during sync; existing content was preserved.");
       await this.app.vault.modify(file, note.contents);
       return true;
     }
 
-    await this.ensureFolder(path);
+    await this.ensureFolder(path, current);
+    current();
     await this.app.vault.create(path, note.contents);
     return true;
   }
 
-  private async ensureFolder(path: string): Promise<void> {
+  private async ensureFolder(path: string, current: () => void): Promise<void> {
+    current();
     const parent = path.slice(0, path.lastIndexOf("/"));
     if (!parent) return;
     const existing = this.app.vault.getAbstractFileByPath(parent);
@@ -343,7 +387,9 @@ export default class NotableHandwritingPlugin extends Plugin {
     if (existing) throw new Error(`A file occupies the notes folder ${parent}.`);
     try {
       await this.app.vault.createFolder(parent);
+      current();
     } catch (error) {
+      current();
       if (!(this.app.vault.getAbstractFileByPath(parent) instanceof TFolder)) throw error;
     }
   }

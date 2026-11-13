@@ -14,6 +14,7 @@ class File {
   constructor(path: string, contents: string) { this.path = path; this.contents = contents; }
 }
 class Folder { path: string; constructor(path: string) { this.path = path; } }
+const PNG_HEADER = [137, 80, 78, 71, 13, 10, 26, 10];
 
 function fixture(http?: (options: { url: string; headers: Record<string, string> }) => Promise<unknown>) {
   const files = new Map<string, File | Folder>();
@@ -46,8 +47,11 @@ function fixture(http?: (options: { url: string; headers: Record<string, string>
         status = server.textStatus ?? 200;
         json = { results: [], last_seq: "0" };
       } else if (request.pathname.includes("notes_images")) {
-        if (request.pathname.endsWith("/page.png")) return { status: server.imageStatus ?? 200,
-          arrayBuffer: new Uint8Array(server.imageBytes ?? [1, 2, 3]).buffer };
+        if (request.pathname.endsWith("/page.png")) {
+          await server.beforeImage?.();
+          return { status: server.imageStatus ?? 200,
+            arrayBuffer: new Uint8Array(server.imageBytes ?? PNG_HEADER).buffer };
+        }
         status = server.imagesStatus ?? 200;
         json = { rows: server.images.map((doc: unknown) => ({ doc })) };
       } else if (request.searchParams.get("startkey") === '"notebook:"') {
@@ -111,7 +115,53 @@ test("metadata-only notes generate entry, day and topic files and survive restar
   assert.match(f.saved().projectionSource, /first\.test/);
 });
 
-const pageImage = { _id: "pageimage:page", pageId: "page", _attachments: { "page.png": { digest: "md5-abc12345", length: 3 } } };
+const pageImage = { _id: "pageimage:page", pageId: "page", _attachments: { "page.png": { digest: "md5-abc12345", length: PNG_HEADER.length } } };
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+for (const stop of ["unload", "source change"]) {
+  test(`a deferred image download cannot write after ${stop}`, async () => {
+    const f = fixture(), p = f.plugin();
+    await p.sync(true);
+    const before = f.snapshot(), saved = JSON.stringify(f.saved()), notices = f.notices.length;
+    const started = deferred(), release = deferred();
+    f.server.images = [pageImage];
+    f.server.beforeImage = async () => { started.resolve(); await release.promise; };
+    const pending = p.sync(true);
+    await started.promise;
+    if (stop === "unload") p.onunload(); else p.settings.url = "https://second.test";
+    release.resolve();
+    await pending;
+    assert.deepEqual(f.snapshot(), before);
+    assert.equal(JSON.stringify(f.saved()), saved);
+    assert.equal(f.notices.length, notices);
+    assert.equal(f.trashed.length, 0);
+  });
+}
+
+test("unloading during a vault read prevents obsolete modifications, trash and checkpoint saves", async () => {
+  const f = fixture(), p = f.plugin();
+  await p.sync(true);
+  const before = f.snapshot(), saved = JSON.stringify(f.saved()), notices = f.notices.length;
+  f.server.org[0].topics.product = { name: "Product", present: false, counter: 2, writer: "boox" };
+  const started = deferred(), release = deferred();
+  const read = p.app.vault.read;
+  p.app.vault.read = async (file: File) => { started.resolve(); await release.promise; return read(file); };
+  const pending = p.sync(true);
+  await started.promise;
+  p.onunload();
+  release.resolve();
+  await pending;
+  await p.saveSettings();
+  assert.deepEqual(f.snapshot(), before);
+  assert.equal(JSON.stringify(f.saved()), saved);
+  assert.equal(f.notices.length, notices);
+  assert.equal(f.trashed.length, 0);
+});
 
 test("upgrading the installed plugin preserves settings and cached ink while migrating its managed note", async () => {
   const f = fixture(), original = f.plugin();
@@ -170,7 +220,7 @@ test("image manifest, download and malformed metadata failures preserve prior ou
   await p.sync(true);
   assert.deepEqual(f.snapshot(), before);
   f.server.imagesStatus = 200;
-  f.server.images = [{ ...pageImage, _attachments: { "page.png": { digest: "md5-new", length: 3 } } }];
+  f.server.images = [{ ...pageImage, _attachments: { "page.png": { digest: "md5-new", length: PNG_HEADER.length } } }];
   f.server.imageStatus = 500;
   await p.sync(true);
   assert.deepEqual(f.snapshot(), before);
@@ -178,6 +228,10 @@ test("image manifest, download and malformed metadata failures preserve prior ou
   f.server.imageBytes = [1];
   await p.sync(true);
   assert.deepEqual(f.snapshot(), before);
+  f.server.imageBytes = PNG_HEADER.map(() => 0);
+  await p.sync(true);
+  assert.deepEqual(f.snapshot(), before);
+  assert.match(f.notices.at(-1)!, /Invalid handwriting PNG/);
   f.server.images = [{ ...pageImage, pageId: "../manual" }];
   await p.sync(true);
   assert.deepEqual(f.snapshot(), before);
