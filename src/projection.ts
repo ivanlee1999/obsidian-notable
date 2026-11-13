@@ -22,6 +22,8 @@ export interface LibrarySnapshot {
   texts: PageTextDoc[];
   pageClocks: Record<string, string>;
   organization?: OrganizationDoc[];
+  inkPaths?: Record<string, string>;
+  inkSource?: string;
 }
 
 /** One note the vault should hold, fully decided. */
@@ -45,6 +47,9 @@ export class Library {
   private folders = new Map<string, FolderDoc>();
   private texts = new Map<string, PageTextDoc>();
   private organization = new Map<string, OrganizationDoc>();
+  private inkPaths = new Map<string, string>();
+  private inkSource = "";
+  private sideBySide = false;
   /** A page's `updatedAt` from its notebook's perspective, for staleness. Absent until known. */
   private pageClocks = new Map<string, string>();
 
@@ -60,6 +65,8 @@ export class Library {
       texts: [...this.texts.values()],
       pageClocks: Object.fromEntries(this.pageClocks),
       organization: [...this.organization.values()],
+      inkPaths: Object.fromEntries(this.inkPaths),
+      inkSource: this.inkSource,
     };
   }
 
@@ -70,6 +77,8 @@ export class Library {
   restore(snapshot: LibrarySnapshot | undefined): boolean {
     if (!snapshot || snapshot.version !== 1) return false;
     this.applyOrganizationSnapshot(snapshot.organization ?? []);
+    this.inkPaths = new Map(Object.entries(snapshot.inkPaths ?? {}));
+    this.inkSource = snapshot.inkSource ?? "";
     for (const doc of snapshot.texts ?? []) this.applyText(doc);
     for (const [pageId, clock] of Object.entries(snapshot.pageClocks ?? {})) {
       this.pageClocks.set(pageId, clock);
@@ -79,8 +88,16 @@ export class Library {
 
   /** Whether any page text is known at all. An empty projection can plan nothing. */
   get isEmpty(): boolean {
-    return this.texts.size === 0 && this.organization.size === 0;
+    return this.texts.size === 0 && this.organization.size === 0 && this.inkPaths.size === 0;
   }
+
+  setInkSource(source: string): void {
+    if (this.inkSource !== source) this.inkPaths.clear();
+    this.inkSource = source;
+  }
+
+  noteInkPath(pageId: string, path: string): void { this.inkPaths.set(pageId, path); }
+  setSideBySide(enabled: boolean): void { this.sideBySide = enabled; }
 
   applyOrganizationSnapshot(values: unknown[]): void {
     const records = organizationSnapshot(values);
@@ -201,6 +218,7 @@ export class Library {
         number: index + 1,
         title: text?.pageTitle ?? null,
         text: text ? (text.text ?? "") : null,
+        inkPath: this.inkPaths.get(pageId) ?? null,
         // Only claimed when both clocks are actually known. Guessing here would put a warning on
         // every page of a vault whose page clocks the plugin has never been told.
         stale:
@@ -231,7 +249,7 @@ export class Library {
       const pages = this.pages(notebook);
       const notebookId = idOf(notebook._id);
       const organization = this.organization.get(notebookId);
-      if (!organization && !pages.some((page) => page.text !== null)) continue;
+      if (!organization && !pages.some((page) => page.text !== null || page.inkPath)) continue;
       const folderPath = this.folderPath(notebook);
       const title = notebook.title?.trim() || "Untitled";
       const key = `${folderPath.join("/")}/${notebook.title ?? ""}`;
@@ -248,6 +266,7 @@ export class Library {
           createdAt: notebook.createdAt,
           updatedAt: notebook.updatedAt,
           pages,
+          sideBySide: this.sideBySide,
           ...(organization ? { journalDate: organization.date,
             topics: Object.keys(organization.topics).sort().filter(key => organization.topics[key].present)
               .map(key => organization.topics[key].name) } : {}),

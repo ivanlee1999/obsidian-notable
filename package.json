@@ -1,6 +1,6 @@
 {
   "name": "obsidian-notable",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Brings handwriting recognized on a BOOX or iPad into an Obsidian vault as notes.",
   "main": "main.js",
   "scripts": {

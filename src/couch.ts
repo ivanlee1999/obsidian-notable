@@ -97,6 +97,15 @@ export class CouchClient {
     };
   }
 
+  async attachment(database: string, documentId: string, name: string): Promise<ArrayBuffer> {
+    const response = await requestUrl({
+      url: `${this.base}/${encodeURIComponent(database)}/${encodeURIComponent(documentId)}/${encodeURIComponent(name)}`,
+      headers: this.headers, throw: false,
+    });
+    if (response.status >= 400) throw new CouchReadError(response.status, `Fetching rendered ink failed with ${response.status}.`);
+    return response.arrayBuffer;
+  }
+
   /**
    * Every document whose id starts with [prefix].
    *

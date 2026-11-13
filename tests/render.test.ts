@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { MANAGED_BY, notePath, renderNote, sanitizeFilename, yamlString } from "../src/render.ts";
+import { MANAGED_BY, notePath, pageHeadingTitle, renderNote, sanitizeFilename, yamlString } from "../src/render.ts";
 import type { PageEntry } from "../src/model.ts";
 
 const page = (overrides: Partial<PageEntry> = {}): PageEntry => ({
@@ -26,8 +26,26 @@ test("pages are numbered and titled from the notebook's order", () => {
     pages: [page({ number: 1 }), page({ number: 2, title: "Second thoughts", text: "later" })],
   });
 
-  assert.match(note, /## Page 1\n/);
+  assert.match(note, /## Page 1 — milk, eggs\n/);
   assert.match(note, /## Page 2 — Second thoughts/);
+});
+
+test("handwriting remains embedded beside or below recognized text", () => {
+  const input = { notebookId: "b", title: "Notes", pages: [page({ inkPath: "Handwritten/_ink/page-1.png" })] };
+  const beside = renderNote({ ...input, sideBySide: true });
+  assert.match(beside, /cssclasses:\n  - notable-side-by-side/);
+  assert.ok(beside.indexOf("![[Handwritten/_ink/page-1.png]]") < beside.lastIndexOf("milk, eggs"));
+  const below = renderNote(input);
+  assert.ok(below.indexOf("![[Handwritten/_ink/page-1.png]]") > below.lastIndexOf("milk, eggs"));
+  assert.doesNotMatch(below, /cssclasses/);
+  assert.match(renderNote({ ...input, pages: [page({ text: null, inkPath: "ink.png" })] }), /!\[\[ink.png\]\]/);
+});
+
+test("page headings retain installed OCR title suggestions", () => {
+  assert.equal(pageHeadingTitle(page({ text: "\n- [ ] # First idea\nMore", title: null })), "First idea");
+  assert.equal(pageHeadingTitle(page({ text: "1. Heading" })), "Heading");
+  assert.equal(pageHeadingTitle(page({ title: "Explicit\nheading" })), "Explicit heading");
+  assert.equal(pageHeadingTitle(page({ text: "😀".repeat(65) })), "😀".repeat(60) + "…");
 });
 
 test("a page nobody has recognized says so instead of appearing empty", () => {

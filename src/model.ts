@@ -28,6 +28,13 @@ export interface PageTextDoc {
   updatedBy?: string;
 }
 
+export interface PageImageDoc {
+  _id: string;
+  _deleted?: boolean;
+  pageId?: string;
+  _attachments?: Record<string, { digest?: string; length?: number }>;
+}
+
 export interface NotebookDoc {
   _id: string;
   _deleted?: boolean;
@@ -56,6 +63,7 @@ export interface PageEntry {
   title: string | null;
   text: string | null;
   stale: boolean;
+  inkPath?: string | null;
 }
 
 export const idOf = (prefixed: string): string => prefixed.slice(prefixed.indexOf(":") + 1);

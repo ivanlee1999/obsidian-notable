@@ -64,7 +64,12 @@ Every generated file carries `managed-by: "notable-handwriting"` and a stable id
    `notes_organization`. For a custom notes database, organization uses its name plus `_organization`.
 2. Turn on recognition in the tablet apps' sync settings if you want transcripts as well as metadata.
 3. Install this plugin, and fill in the server URL, credentials, and databases.
-4. "Test" checks all three databases; "Sync handwriting now" pulls immediately.
+4. "Test" checks the configured databases; "Sync handwriting now" pulls immediately.
+
+Rendered handwriting is read from `notes_images` and cached under `_ink` beside the notes.
+Leave Images database empty for transcripts only. Turn on "Handwriting beside the text" to use
+the bundled side-by-side layout. Existing image caches and this preference survive upgrades;
+image read failures leave the previous notes intact, and old cached images are retained.
 
 The plugin polls while Obsidian is open — it is not a background service, so a vault that has
 been closed for a week catches up when you next open it.
@@ -76,6 +81,7 @@ been closed for a week catches up when you next open it.
 | `notes` | read | Notebook names, page order, folders. Page documents are never fetched — they hold stroke data. |
 | `notes_text` | read | One `pagetext:<pageId>` document per recognized page. |
 | `notes_organization` | read | Capture dates and independently versioned topic assignments/removals. |
+| `notes_images` | read | Optional `pageimage:<pageId>` records and rendered `page.png` attachments. |
 
 The last valid organization snapshot is cached with its server/database identity. A failed or
 malformed snapshot leaves the existing generated files unchanged. Keep the organization database

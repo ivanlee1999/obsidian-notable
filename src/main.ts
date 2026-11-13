@@ -10,12 +10,12 @@ import {
 } from "obsidian";
 import { CouchClient, CouchReadError } from "./couch.ts";
 import {
-  isFolderId,
-  isNotebookId,
   isPageTextId,
+  idOf,
   type FolderDoc,
   type NotebookDoc,
   type PageTextDoc,
+  type PageImageDoc,
 } from "./model.ts";
 import { Library, type LibrarySnapshot, type PlannedNote } from "./projection.ts";
 import { fileId, managedIdentity, reservePath, yamlString } from "./render.ts";
@@ -27,6 +27,8 @@ interface Settings {
   password: string;
   notesDatabase: string;
   textDatabase: string;
+  imagesDatabase: string;
+  sideBySide: boolean;
   folder: string;
   pollMinutes: number;
   /** Where the text feed was last read up to. Resetting it rebuilds every note. */
@@ -45,6 +47,8 @@ const DEFAULTS: Settings = {
   password: "",
   notesDatabase: "notes",
   textDatabase: "notes_text",
+  imagesDatabase: "notes_images",
+  sideBySide: false,
   folder: "Handwritten",
   pollMinutes: 5,
   checkpoint: "0",
@@ -185,8 +189,12 @@ export default class NotableHandwritingPlugin extends Plugin {
         if (changes.rows.length === 0) break;
       }
 
+      await this.syncInk(client, settings, next);
+      next.setSideBySide(settings.sideBySide);
+
       if (source !== organizationSource(this.settings.url, this.settings.notesDatabase, this.settings.textDatabase) ||
-        settings.folder !== this.settings.folder) return;
+        settings.folder !== this.settings.folder || settings.imagesDatabase !== this.settings.imagesDatabase ||
+        settings.sideBySide !== this.settings.sideBySide) return;
       this.library = next;
       this.projectionSource = source;
       this.lastFailure = null;
@@ -224,6 +232,37 @@ export default class NotableHandwritingPlugin extends Plugin {
     } finally {
       this.syncing = false;
     }
+  }
+
+  private async syncInk(client: CouchClient, settings: Settings, library: Library): Promise<void> {
+    const root = normalizePath(settings.folder);
+    if (!root || root === "." || root.startsWith("/") || root.split("/").includes("..")) throw new Error("Choose a dedicated notes folder.");
+    library.setInkSource(JSON.stringify([settings.url.replace(/\/+$/, ""), settings.imagesDatabase, root]));
+    if (!settings.imagesDatabase) return;
+    // Read the complete image manifest before replacing notes. An outage must not remove embeds.
+    const images = await client.allWithPrefix<PageImageDoc>(settings.imagesDatabase, "pageimage:");
+    for (const image of images) {
+      const pageId = image.pageId ?? idOf(image._id);
+      const attachment = image._attachments?.["page.png"];
+      if (!/^[A-Za-z0-9._-]+$/.test(pageId) || image._id !== `pageimage:${pageId}` || image._deleted ||
+        !attachment || typeof attachment.digest !== "string" || !attachment.digest ||
+        (attachment.length !== undefined && (!Number.isSafeInteger(attachment.length) || attachment.length < 0))) {
+        throw new Error("Invalid page image metadata; existing notes were preserved.");
+      }
+      // Keep the installed plugin's cache names so an upgrade reuses downloaded handwriting.
+      const digest = attachment.digest.replace(/[^a-zA-Z0-9]/g, "").slice(-8) || "0";
+      const path = `${root}/_ink/${pageId}-${digest}.png`;
+      const existing = this.app.vault.getAbstractFileByPath(path);
+      if (existing && !(existing instanceof TFile)) throw new Error(`A folder occupies the image path ${path}.`);
+      if (!existing) {
+        const bytes = await client.attachment(settings.imagesDatabase, image._id, "page.png");
+        if (attachment.length !== undefined && bytes.byteLength !== attachment.length) throw new Error("Incomplete handwriting image; existing notes were preserved.");
+        await this.ensureFolder(path);
+        await this.app.vault.createBinary(path, bytes);
+      }
+      library.noteInkPath(pageId, path);
+    }
+    // Old images remain available to existing links, including images absent from this snapshot.
   }
 
   /** Brings the vault in line with the plan, and returns how many notes actually changed. */
@@ -371,6 +410,21 @@ class NotableSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Images database")
+      .setDesc("Rendered handwriting pages. Leave empty to sync only recognized text.")
+      .addText((text) => text.setValue(this.plugin.settings.imagesDatabase).onChange(async (value) => {
+        this.plugin.settings.imagesDatabase = value.trim();
+        await this.plugin.saveSettings();
+      }));
+
+    new Setting(containerEl)
+      .setName("Handwriting beside the text")
+      .addToggle((toggle) => toggle.setValue(this.plugin.settings.sideBySide).onChange(async (value) => {
+        this.plugin.settings.sideBySide = value;
+        await this.plugin.saveSettings();
+      }));
+
+    new Setting(containerEl)
       .setName("Folder")
       .setDesc("Where notes are written. The plugin only ever touches files it wrote here.")
       .addText((text) =>
@@ -395,7 +449,7 @@ class NotableSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Connection")
-      .setDesc("Checks the ink, recognized text, and journal organization databases.")
+      .setDesc("Checks the library, recognized text, journal organization, and configured images databases.")
       .addButton((button) =>
         button.setButtonText("Test").onClick(async () => {
           const client = new CouchClient(this.plugin.settings);
@@ -403,6 +457,7 @@ class NotableSettingTab extends PluginSettingTab {
             await client.ping(this.plugin.settings.notesDatabase);
             await client.ping(this.plugin.settings.textDatabase);
             await client.ping(`${this.plugin.settings.notesDatabase}_organization`);
+            if (this.plugin.settings.imagesDatabase) await client.ping(this.plugin.settings.imagesDatabase);
             new Notice("Notable: all databases are reachable.");
           } catch (error) {
             new Notice(`Notable: ${error instanceof Error ? error.message : String(error)}`);

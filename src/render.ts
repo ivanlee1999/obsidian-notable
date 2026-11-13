@@ -2,6 +2,7 @@ import type { PageEntry } from "./model.ts";
 
 /** What the plugin stamps on every note it owns. Nothing without this is ever touched. */
 export const MANAGED_BY = "notable-handwriting";
+export const SIDE_BY_SIDE_CLASS = "notable-side-by-side";
 export type ManagedKind = "notebook" | "day" | "topic";
 
 export interface NoteInput {
@@ -12,6 +13,7 @@ export interface NoteInput {
   pages: PageEntry[];
   journalDate?: string | null;
   topics?: string[];
+  sideBySide?: boolean;
 }
 
 /**
@@ -30,26 +32,40 @@ export function renderNote(input: NoteInput): string {
     ...(input.journalDate ? [`journal-date: ${yamlString(input.journalDate)}`] : []),
     ...(input.topics ? [`topics: [${input.topics.map(yamlString).join(", ")}]`] : []),
     `notable-id: ${yamlString(input.notebookId)}`,
+    ...(input.sideBySide ? ["cssclasses:", `  - ${SIDE_BY_SIDE_CLASS}`] : []),
     // The marker that makes this note the plugin's to overwrite, and the id that lets a rename be
     // a rename. Removing either by hand is how a reader takes a note back into their own keeping.
     `managed-by: ${yamlString(MANAGED_BY)}`,
     "---",
   ].join("\n");
 
-  const body = input.pages.map(renderPage).join("\n\n");
+  const body = input.pages.map(page => renderPage(page, input.sideBySide ?? false)).join("\n\n");
   return `${frontmatter}\n\n${body}\n`;
 }
 
-function renderPage(page: PageEntry): string {
-  const heading = page.title
-    ? `## Page ${page.number} — ${page.title}`
+export function pageHeadingTitle(page: PageEntry): string | null {
+  if (page.title?.trim()) return page.title.trim().replace(/[\r\n]+/g, " ");
+  const firstLine = page.text?.split(/\r?\n/).find(line => line.trim());
+  if (!firstLine) return null;
+  const cleaned = firstLine.trim().replace(/^(?:[-*+•]|\d+[.)]|[①-⑳])\s*/, "")
+    .replace(/[\[\]]/g, "").trim().replace(/^#+\s*/, "").replace(/\s+/g, " ").trim();
+  const characters = Array.from(cleaned);
+  return characters.length > 60 ? `${characters.slice(0, 60).join("").trimEnd()}…` : cleaned || null;
+}
+
+function renderPage(page: PageEntry, sideBySide: boolean): string {
+  const title = pageHeadingTitle(page);
+  const heading = title
+    ? `## Page ${page.number} — ${title}`
     : `## Page ${page.number}`;
+  const image = page.inkPath ? `![[${page.inkPath}]]` : "";
+  const content = (text: string) => `${heading}\n\n${sideBySide && image ? `${image}\n\n` : ""}${text}${!sideBySide && image ? `\n\n${image}` : ""}`;
 
   if (page.text === null) {
-    return `${heading}\n\n*Not recognized yet.*`;
+    return content("*Not recognized yet.*");
   }
   if (page.text.trim() === "") {
-    return `${heading}\n\n*No handwriting found on this page.*`;
+    return content("*No handwriting found on this page.*");
   }
 
   // Said in a comment rather than in the prose: it is a fact about the sync, not about the note,
@@ -57,7 +73,7 @@ function renderPage(page: PageEntry): string {
   const staleness = page.stale
     ? "<!-- This page has been written on since it was last recognized. -->\n"
     : "";
-  return `${heading}\n\n${staleness}${page.text.trim()}`;
+  return content(`${staleness}${page.text.trim()}`);
 }
 
 /**

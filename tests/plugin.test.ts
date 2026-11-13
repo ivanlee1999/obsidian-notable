@@ -22,7 +22,7 @@ function fixture(http?: (options: { url: string; headers: Record<string, string>
   const server: any = {
     org: [{ _id: "journal:note", type: "journal", schema: 1, notebookId: "note", date: "2026-11-11", createdAt: 1,
       topics: { product: { name: "Product", present: true, counter: 1, writer: "boox" } } }],
-    books: [{ _id: "notebook:note", title: "Idea", pageIds: ["page"] }], folders: [], status: 200,
+    books: [{ _id: "notebook:note", title: "Idea", pageIds: ["page"] }], folders: [], images: [], status: 200,
   };
   const notices: string[] = [];
   const api: any = {
@@ -45,6 +45,11 @@ function fixture(http?: (options: { url: string; headers: Record<string, string>
       } else if (request.pathname.includes("notes_text")) {
         status = server.textStatus ?? 200;
         json = { results: [], last_seq: "0" };
+      } else if (request.pathname.includes("notes_images")) {
+        if (request.pathname.endsWith("/page.png")) return { status: server.imageStatus ?? 200,
+          arrayBuffer: new Uint8Array(server.imageBytes ?? [1, 2, 3]).buffer };
+        status = server.imagesStatus ?? 200;
+        json = { rows: server.images.map((doc: unknown) => ({ doc })) };
       } else if (request.searchParams.get("startkey") === '"notebook:"') {
         json = { rows: server.books.map((doc: unknown) => ({ doc })) };
       } else json = { rows: server.folders.map((doc: unknown) => ({ doc })) };
@@ -59,13 +64,17 @@ function fixture(http?: (options: { url: string; headers: Record<string, string>
   function plugin() {
     const result = new Plugin();
     result.app = { vault: {
-      getMarkdownFiles: () => [...files.values()].filter((file): file is File => file instanceof File),
+      getMarkdownFiles: () => [...files.values()].filter((file): file is File => file instanceof File && file.path.endsWith(".md")),
       getAbstractFileByPath: (path: string) => files.get(path) ?? null,
       read: async (file: File) => file.contents,
       modify: async (file: File, contents: string) => { file.contents = contents; },
       create: async (path: string, contents: string) => {
         if (files.has(path)) throw new Error("File already exists");
         const file = new File(path, contents); files.set(path, file); return file;
+      },
+      createBinary: async (path: string, bytes: ArrayBuffer) => {
+        if (files.has(path)) throw new Error("File already exists");
+        const file = new File(path, Buffer.from(bytes).toString("hex")); files.set(path, file); return file;
       },
       createFolder: async (path: string) => {
         let parent = "";
@@ -100,6 +109,91 @@ test("metadata-only notes generate entry, day and topic files and survive restar
   await next.sync(true);
   assert.deepEqual(f.snapshot(), before);
   assert.match(f.saved().projectionSource, /first\.test/);
+});
+
+const pageImage = { _id: "pageimage:page", pageId: "page", _attachments: { "page.png": { digest: "md5-abc12345", length: 3 } } };
+
+test("upgrading the installed plugin preserves settings and cached ink while migrating its managed note", async () => {
+  const f = fixture(), original = f.plugin();
+  await original.saveData({ ...original.settings, sideBySide: true, checkpoint: "old-checkpoint" });
+  const prior = new File("Handwritten/Idea.md", renderNote({ notebookId: "note", title: "Idea", pages: [] }));
+  const image = new File("Handwritten/_ink/page-abc12345.png", "existing handwriting bytes");
+  f.files.set(prior.path, prior);
+  f.files.set(image.path, image);
+  f.server.images = [pageImage];
+  f.server.imageStatus = 500;
+  const upgraded = f.plugin();
+  await upgraded.loadSettings();
+  assert.equal(upgraded.settings.checkpoint, "0");
+  assert.equal(upgraded.settings.sideBySide, true);
+  await upgraded.sync(true);
+  assert.equal(f.files.get(image.path), image);
+  assert.equal(f.files.get("Handwritten/Idea.md"), undefined);
+  assert.equal(f.files.get(`Handwritten/Entries/${fileId("note")}.md`), prior);
+  assert.match(prior.contents, /notable-side-by-side/);
+  assert.match(prior.contents, /!\[\[Handwritten\/_ink\/page-abc12345.png\]\]/);
+  assert.equal(f.trashed.length, 0);
+});
+
+test("installed image settings, embeds and journal metadata survive sync and restart", async () => {
+  const f = fixture(), p = f.plugin();
+  p.settings.sideBySide = true;
+  f.server.images = [pageImage];
+  await p.sync(true);
+  const note = f.snapshot().find(([path]) => path.endsWith(".md") && path.includes("Entries"))![1];
+  assert.match(note, /!\[\[Handwritten\/_ink\/page-abc12345.png\]\]/);
+  assert.match(note, /cssclasses:\n  - notable-side-by-side/);
+  assert.match(note, /journal-date: "2026-11-11"/);
+  assert.match(note, /topics: \["Product"\]/);
+  assert.equal(f.saved().imagesDatabase, "notes_images");
+  const before = f.snapshot();
+  const next = f.plugin();
+  await next.loadSettings();
+  assert.equal(next.settings.sideBySide, true);
+  // An existing cached image does not need downloading again.
+  f.server.imageStatus = 500;
+  await next.sync(true);
+  assert.deepEqual(f.snapshot(), before);
+  // Manifest omission does not invalidate image links from the persisted projection.
+  f.server.images = [];
+  await next.sync(true);
+  assert.deepEqual(f.snapshot(), before);
+});
+
+test("image manifest, download and malformed metadata failures preserve prior output", async () => {
+  const f = fixture(), p = f.plugin();
+  f.server.images = [pageImage];
+  await p.sync(true);
+  const before = f.snapshot();
+  f.server.org[0].topics.product = { name: "Product", present: false, counter: 2, writer: "boox" };
+  f.server.imagesStatus = 503;
+  await p.sync(true);
+  assert.deepEqual(f.snapshot(), before);
+  f.server.imagesStatus = 200;
+  f.server.images = [{ ...pageImage, _attachments: { "page.png": { digest: "md5-new", length: 3 } } }];
+  f.server.imageStatus = 500;
+  await p.sync(true);
+  assert.deepEqual(f.snapshot(), before);
+  f.server.imageStatus = 200;
+  f.server.imageBytes = [1];
+  await p.sync(true);
+  assert.deepEqual(f.snapshot(), before);
+  f.server.images = [{ ...pageImage, pageId: "../manual" }];
+  await p.sync(true);
+  assert.deepEqual(f.snapshot(), before);
+  assert.equal(f.trashed.length, 0);
+});
+
+test("image-only notebooks remain visible and historical PNGs are not pruned", async () => {
+  const f = fixture(), p = f.plugin();
+  f.server.org = [];
+  f.server.images = [pageImage];
+  const manual = new File("Handwritten/_ink/manual.png", "independent image");
+  f.files.set(manual.path, manual);
+  await p.sync(true);
+  assert.match(f.snapshot().find(([path]) => path === "Handwritten/Idea.md")![1], /!\[\[Handwritten\/_ink\/page-abc12345.png\]\]/);
+  assert.equal(f.files.get(manual.path), manual);
+  assert.equal(f.trashed.length, 0);
 });
 
 test("malformed or unavailable organization snapshot never rewrites or trashes prior files", async () => {
@@ -240,7 +334,7 @@ test("real CouchDB metadata pulls, removals and outage preserve the vault", {
       return { status: response.status, json: await response.json() };
     });
     const p = f.plugin();
-    Object.assign(p.settings, { url, username: user, password, notesDatabase: database, textDatabase: `${database}_text` });
+    Object.assign(p.settings, { url, username: user, password, notesDatabase: database, textDatabase: `${database}_text`, imagesDatabase: "" });
     await p.sync(true);
     assert.equal(f.snapshot().length, 3);
     organization = { ...organization, topics: { product: { name: "Product", present: false, counter: 2, writer: "ipad" } } };
