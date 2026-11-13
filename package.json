@@ -1,14 +1,19 @@
 {
   "name": "obsidian-notable",
-  "version": "0.2.0",
-  "description": "Brings handwriting recognized on a BOOX or iPad into an Obsidian vault as notes.",
+  "version": "0.3.0",
+  "description": "Brings typed notes, handwriting, journal dates, and tags from Notable and Bopa into your vault.",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production",
     "test": "node --test --experimental-strip-types tests/*.test.ts"
   },
-  "keywords": ["obsidian", "handwriting", "couchdb", "notable"],
+  "keywords": [
+    "obsidian",
+    "handwriting",
+    "couchdb",
+    "notable"
+  ],
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^22.10.0",

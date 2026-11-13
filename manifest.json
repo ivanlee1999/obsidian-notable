@@ -1,9 +1,9 @@
 {
   "id": "notable-handwriting",
   "name": "Notable Handwriting",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "minAppVersion": "1.5.0",
-  "description": "Brings handwriting recognized on a BOOX or iPad into your vault as notes.",
+  "description": "Brings typed notes, handwriting, journal dates, and tags from Notable and Bopa into your vault.",
   "author": "ivan",
   "isDesktopOnly": false
 }
