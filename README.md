@@ -1,13 +1,14 @@
 # Notable Handwriting
 
-Brings handwriting recognized on a BOOX (notable) or iPad (bopa) into an Obsidian vault as notes.
+Brings typed notes, handwriting, journal dates, and tags from Notable and Bopa into an Obsidian vault.
 
 The tablets recognize their own ink — the BOOX through its firmware's MyScript engine, the iPad
 through Apple's Vision framework — and publish the text to a CouchDB database. This plugin reads
 that database and writes one note per notebook.
 
-Nothing recognizes handwriting here. If a page has no text in the vault, no tablet has read it
-yet.
+Typed Markdown appears directly, without handwriting recognition. Handwriting transcripts still
+depend on recognition in the tablet apps. Previous text versions are available in a collapsed
+section; the original ink stays separate from flowing text.
 
 ## What it writes
 
@@ -78,7 +79,7 @@ been closed for a week catches up when you next open it.
 
 | Database | Access | Why |
 |---|---|---|
-| `notes` | read | Notebook names, page order, folders. Page documents are never fetched — they hold stroke data. |
+| `notes` | read | Notebook names, page order, folders, and a projection of page text blocks that excludes stroke data. |
 | `notes_text` | read | One `pagetext:<pageId>` document per recognized page. |
 | `notes_organization` | read | Capture dates and independently versioned topic assignments/removals. |
 | `notes_images` | read | Optional `pageimage:<pageId>` records and rendered `page.png` attachments. |
