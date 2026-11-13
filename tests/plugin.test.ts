@@ -16,7 +16,7 @@ class File {
 class Folder { path: string; constructor(path: string) { this.path = path; } }
 const PNG_HEADER = [137, 80, 78, 71, 13, 10, 26, 10];
 
-function fixture(http?: (options: { url: string; headers: Record<string, string> }) => Promise<unknown>) {
+function fixture(http?: (options: { url: string; headers: Record<string, string>; method?: string; body?: string }) => Promise<unknown>) {
   const files = new Map<string, File | Folder>();
   const trashed: File[] = [];
   let saved: any = null;
@@ -411,18 +411,25 @@ test("real CouchDB metadata pulls, removals and outage preserve the vault", {
   };
   try {
     for (const name of databases) await put(name);
-    await put(`${database}/notebook:note`, { title: "Live journal entry", pageIds: [] });
+    await put(`${database}/notebook:note`, { title: "Live journal entry", pageIds: ["page"] });
+    await put(`${database}/page:page`, { notebookId: "note", blocks: [
+      { id: "body", kind: "md", orderKey: "1", text: "Live typed source\n\nSecond paragraph." },
+      { id: "history", kind: "text-version", text: "Earlier exact source" },
+    ], deletedBlocks: [] });
     let organization = { type: "journal", schema: 1, notebookId: "note", date: "2026-11-11", createdAt: 1,
       topics: { product: { name: "Product", present: true, counter: 1, writer: "boox" } } };
     const initial = await put(`${database}_organization/journal:note`, organization);
-    const f = fixture(async ({ url, headers }) => {
-      const response = await fetch(url, { headers });
+    const f = fixture(async ({ url, headers, method, body }) => {
+      const response = await fetch(url, { headers, method, body });
       return { status: response.status, json: await response.json() };
     });
     const p = f.plugin();
     Object.assign(p.settings, { url, username: user, password, notesDatabase: database, textDatabase: `${database}_text`, imagesDatabase: "" });
     await p.sync(true);
     assert.equal(f.snapshot().length, 3);
+    const typed = f.snapshot().find(([path]) => path.includes("/Entries/"))![1];
+    assert.match(typed, /Live typed source\n\nSecond paragraph\./);
+    assert.match(typed, /Earlier exact source/);
     organization = { ...organization, topics: { product: { name: "Product", present: false, counter: 2, writer: "ipad" } } };
     await put(`${database}_organization/journal:note`, { ...organization, _rev: initial.rev });
     await p.sync(true);
