@@ -35,6 +35,9 @@ test("invalid dates, ids, revisions, topic keys and tombstones fail closed", () 
     { ...doc(), _id: "journal:other" }, { ...doc(), _deleted: true }, { ...doc(), schema: 2 },
     doc({ topics: { wrong: { name: "Product", present: true, counter: 1, writer: "a" } } }),
     doc({ topics: { product: { name: "Product", present: true, counter: -1, writer: "a" } } }),
+    { ...doc(), notebookId: "é", _id: "journal:é" },
+    doc({ topics: { product: { name: "Product", present: true, counter: 1, writer: "é" } } }),
+    doc({ topics: { "e\u0301": { name: "e\u0301", present: true, counter: 1, writer: "a" } } }),
   ];
   for (const value of invalid) assert.throws(() => organizationSnapshot([value]));
 });
@@ -89,9 +92,21 @@ test("managed identity protects unmarked, differently owned, and differently sco
   assert.equal(reservePath("Ink/A.md", identity, occupied), path);
   assert.notEqual(reservePath("Ink/A.md", JSON.stringify(["notebook", "b"]), occupied), path);
   assert.equal(managedIdentity(a), identity);
+  assert.equal(managedIdentity(a.replace(/\n/g, "\r\n")), identity);
   assert.equal(managedIdentity(a.replace("---\n", '---\nnotable-source: "old"\n'), "new"), null);
   assert.equal(managedIdentity("# User's own writing"), null);
   assert.equal(fileId("a"), fileId("a"));
+});
+
+test("day indexes order captures by time and topic indexes show newest first", () => {
+  const lib = new Library();
+  lib.applyOrganizationSnapshot([doc({ createdAt: 2 }),
+    doc({ _id: "journal:second", notebookId: "second", createdAt: 1 })]);
+  lib.replaceLibrary([{ _id: "notebook:note", title: "Later" }, { _id: "notebook:second", title: "Earlier" }], []);
+  const day = lib.plan("Ink").find(note => note.kind === "day")!.contents;
+  const topic = lib.plan("Ink").find(note => note.kind === "topic")!.contents;
+  assert.ok(day.indexOf("Earlier") < day.indexOf("Later"));
+  assert.ok(topic.indexOf("Later") < topic.indexOf("Earlier"));
 });
 
 test("multiline titles and topic punctuation remain valid single-line JSON YAML values", () => {

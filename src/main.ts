@@ -55,6 +55,7 @@ export default class NotableHandwritingPlugin extends Plugin {
   private library = new Library();
   private syncing = false;
   private projectionSource = "";
+  private lastFailure: string | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -143,7 +144,12 @@ export default class NotableHandwritingPlugin extends Plugin {
       const sameSource = this.projectionSource === source;
       if (sameSource) next.restore(this.library.snapshot());
       const client = new CouchClient(settings);
-      const organization = await client.allWithPrefix<unknown>(`${settings.notesDatabase}_organization`, "journal:");
+      let organization: unknown[];
+      try { organization = await client.allWithPrefix<unknown>(`${settings.notesDatabase}_organization`, "journal:"); }
+      catch (error) {
+        throw new Error(`Cannot read ${settings.notesDatabase}_organization. Check its provisioning and access. ` +
+          (error instanceof Error ? error.message : String(error)));
+      }
       next.applyOrganizationSnapshot(organization);
 
       // The library is re-read whole each sync rather than followed as a feed. It is small — one
@@ -183,6 +189,7 @@ export default class NotableHandwritingPlugin extends Plugin {
         settings.folder !== this.settings.folder) return;
       this.library = next;
       this.projectionSource = source;
+      this.lastFailure = null;
 
       // A sync that knows no page text at all cannot have a correct plan, and the only thing an
     // empty plan does is delete. Backstop for the case loadSettings cannot repair — a text
@@ -211,8 +218,9 @@ export default class NotableHandwritingPlugin extends Plugin {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error("Notable handwriting sync failed", error);
-      // A failed metadata read must be visible even on a background check.
-      new Notice(`Notable: ${message} Journal sync requires ${this.settings.notesDatabase}_organization.`);
+      // Show a background failure once; keep manual retries explicit without repeated timer notices.
+      if (announce || this.lastFailure !== message) new Notice(`Notable: ${message}`);
+      this.lastFailure = message;
     } finally {
       this.syncing = false;
     }

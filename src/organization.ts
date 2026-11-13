@@ -17,11 +17,11 @@ export interface OrganizationDoc {
 
 const whitespace = /^[ \t\r\n\f\v]+|[ \t\r\n\f\v]+$/g;
 const asciiLower = (value: string): string => value.replace(/[A-Z]/g, letter => letter.toLowerCase());
-const whitespaceName = (value: string): string => value.replace(whitespace, "").replace(/[ \t\r\n\f\v]+/g, " ");
+const whitespaceName = (value: string): string => value.replace(whitespace, "").replace(/[ \t\r\n\f\v]+/g, " ").normalize("NFC");
 export function topicKey(name: string): string {
   let value = name.replace(whitespace, "");
   if (value.startsWith("#")) value = value.slice(1).replace(whitespace, "");
-  return asciiLower(whitespaceName(value));
+  return asciiLower(whitespaceName(value)).normalize("NFC");
 }
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -33,7 +33,7 @@ export function organizationSnapshot(values: unknown[]): OrganizationDoc[] {
   const seen = new Set<string>();
   return values.map((value) => {
     if (!object(value) || value._deleted || value.type !== "journal" || value.schema !== 1 ||
-      typeof value.notebookId !== "string" || !value.notebookId ||
+      typeof value.notebookId !== "string" || !/^[A-Za-z0-9._-]+$/.test(value.notebookId) ||
       value._id !== `journal:${value.notebookId}` || seen.has(value.notebookId) ||
       !Number.isSafeInteger(value.createdAt) || (value.createdAt as number) < 0 ||
       !object(value.topics)) throw new Error("Invalid journal organization record; existing notes were preserved.");
@@ -46,9 +46,9 @@ export function organizationSnapshot(values: unknown[]): OrganizationDoc[] {
     }
     for (const [key, state] of Object.entries(value.topics)) {
       if (!object(state) || typeof state.name !== "string" || !key || !state.name ||
-        whitespaceName(state.name) !== state.name || asciiLower(state.name) !== key ||
+        whitespaceName(state.name) !== state.name || asciiLower(state.name).normalize("NFC") !== key ||
         typeof state.present !== "boolean" || !Number.isSafeInteger(state.counter) ||
-        (state.counter as number) < 0 || typeof state.writer !== "string" || !state.writer) {
+        (state.counter as number) < 0 || typeof state.writer !== "string" || !/^[A-Za-z0-9._-]+$/.test(state.writer)) {
         throw new Error("Invalid journal topic; existing notes were preserved.");
       }
     }
