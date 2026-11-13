@@ -2,8 +2,8 @@
  * The documents this plugin reads, and nothing else.
  *
  * Two databases are involved. `notes` is the apps' synced library, governed by their sync
- * protocol — this plugin only ever reads it, and only the notebook and folder documents, never a
- * page (whose body is stroke data measured in megabytes) and never an attachment. `notes_text`
+ * protocol — this plugin reads notebooks/folders and projected page blocks, never page stroke
+ * geometry or source attachments. `notes_text`
  * holds recognized handwriting, one document per page. See docs/recognized-text.md in the bopa
  * repo, which is the shared contract.
  *
@@ -55,6 +55,60 @@ export interface FolderDoc {
   deletedAt?: string | null;
 }
 
+/** Projected from the library database: no stroke geometry or binary assets. */
+export interface PageContentDoc {
+  _id: string;
+  _deleted?: boolean;
+  notebookId?: string;
+  title?: string | null;
+  updatedAt?: string;
+  blocks?: {
+    id: string;
+    kind?: string;
+    orderKey?: string;
+    text?: string | null;
+    x?: number | null;
+    y?: number | null;
+  }[];
+  deletedBlocks?: { id: string }[];
+}
+
+export function isPageContentDoc(value: unknown): value is PageContentDoc {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const page = value as PageContentDoc;
+  return typeof page._id === "string" && page._id.startsWith("page:") &&
+    (page._deleted === true || typeof page.notebookId === "string") &&
+    (page.title == null || typeof page.title === "string") &&
+    (page.updatedAt == null || typeof page.updatedAt === "string") &&
+    (page.blocks === undefined || (Array.isArray(page.blocks) && page.blocks.every(block =>
+      block && typeof block.id === "string" && block.id.length > 0 &&
+      (block.kind == null || typeof block.kind === "string") &&
+      (block.orderKey == null || typeof block.orderKey === "string") &&
+      (block.text == null || typeof block.text === "string")))) &&
+    (page.deletedBlocks === undefined || (Array.isArray(page.deletedBlocks) &&
+      page.deletedBlocks.every(block => block && typeof block.id === "string")));
+}
+
+/** Bytewise order matches the two writers, including non-ASCII fractional keys. */
+function byteOrder(a: string, b: string): number {
+  const x = new TextEncoder().encode(a), y = new TextEncoder().encode(b);
+  for (let i = 0; i < Math.min(x.length, y.length); i++) if (x[i] !== y[i]) return x[i] - y[i];
+  return x.length - y.length;
+}
+
+export function flowingText(page: PageContentDoc): { text: string | null; versions: string[] } {
+  const removed = new Set((page.deletedBlocks ?? []).map(block => block.id));
+  const live = (page.blocks ?? []).filter(block => !removed.has(block.id));
+  const blocks = live.filter(block => (block.kind ?? "md") === "md" && typeof block.text === "string" &&
+    (block.x == null || block.y == null)).sort((a, b) =>
+      byteOrder(a.orderKey ?? "", b.orderKey ?? "") || byteOrder(a.id, b.id));
+  const current = new Set(blocks.map(block => block.text!));
+  return { text: blocks.length ? blocks.map(block => block.text).join("\n\n") : null,
+    versions: [...new Set(live.filter(block => block.kind === "text-version" &&
+      typeof block.text === "string" && !current.has(block.text))
+      .sort((a, b) => byteOrder(a.id, b.id)).map(block => block.text!))] };
+}
+
 /** A page's text as the renderer wants it: already matched to its position in the notebook. */
 export interface PageEntry {
   pageId: string;
@@ -64,6 +118,9 @@ export interface PageEntry {
   text: string | null;
   stale: boolean;
   inkPath?: string | null;
+  /** Canonical typed Markdown, separate from derived handwriting recognition. */
+  flowText?: string | null;
+  previousText?: string[];
 }
 
 export const idOf = (prefixed: string): string => prefixed.slice(prefixed.indexOf(":") + 1);

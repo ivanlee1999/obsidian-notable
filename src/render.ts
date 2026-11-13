@@ -45,7 +45,7 @@ export function renderNote(input: NoteInput): string {
 
 export function pageHeadingTitle(page: PageEntry): string | null {
   if (page.title?.trim()) return page.title.trim().replace(/[\r\n]+/g, " ");
-  const firstLine = page.text?.split(/\r?\n/).find(line => line.trim());
+  const firstLine = (page.flowText ?? page.text)?.split(/\r?\n/).find(line => line.trim());
   if (!firstLine) return null;
   const cleaned = firstLine.trim().replace(/^(?:[-*+•]|\d+[.)]|[①-⑳])\s*/, "")
     .replace(/[\[\]]/g, "").trim().replace(/^#+\s*/, "").replace(/\s+/g, " ").trim();
@@ -60,6 +60,13 @@ function renderPage(page: PageEntry, sideBySide: boolean): string {
     : `## Page ${page.number}`;
   const image = page.inkPath ? `![[${page.inkPath}]]` : "";
   const content = (text: string) => `${heading}\n\n${sideBySide && image ? `${image}\n\n` : ""}${text}${!sideBySide && image ? `\n\n${image}` : ""}`;
+
+  if (page.flowText != null || page.previousText?.length) {
+    const parts = page.flowText?.trim() ? [page.flowText.trim()] : [];
+    if (page.text?.trim()) parts.push(`### Handwriting\n\n${page.text.trim()}`);
+    if (page.previousText?.length) parts.push(`<details>\n<summary>Previous text versions</summary>\n\n${page.previousText.join("\n\n---\n\n")}\n\n</details>`);
+    return content(parts.join("\n\n"));
+  }
 
   if (page.text === null) {
     return content("*Not recognized yet.*");

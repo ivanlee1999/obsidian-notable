@@ -12,6 +12,21 @@ const page = (overrides: Partial<PageEntry> = {}): PageEntry => ({
   ...overrides,
 });
 
+test("typed source, handwriting and previous versions remain distinct and keep the ink embed", () => {
+  const note = renderNote({ notebookId: "b", title: "Mixed", pages: [page({
+    flowText: "# Typed heading\n\nA typed follow-up.", text: "Original handwritten thought.",
+    inkPath: "ink.png", previousText: ["An older typed thought."],
+  })] });
+  assert.match(note, /## Page 1 — Typed heading/);
+  assert.match(note, /# Typed heading\n\nA typed follow-up\./);
+  assert.match(note, /### Handwriting\n\nOriginal handwritten thought\./);
+  assert.match(note, /<summary>Previous text versions<\/summary>/);
+  assert.match(note, /An older typed thought\./);
+  assert.match(note, /!\[\[ink.png\]\]/);
+  const typed = renderNote({ notebookId: "b", title: "Typed", pages: [page({ flowText: "Typed only", text: null })] });
+  assert.doesNotMatch(typed, /Not recognized|No handwriting|### Handwriting/);
+});
+
 test("a note carries the marker that makes it the plugin's to overwrite", () => {
   const note = renderNote({ notebookId: "book-1", title: "Groceries", pages: [page()] });
 

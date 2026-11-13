@@ -23,7 +23,7 @@ function fixture(http?: (options: { url: string; headers: Record<string, string>
   const server: any = {
     org: [{ _id: "journal:note", type: "journal", schema: 1, notebookId: "note", date: "2026-11-11", createdAt: 1,
       topics: { product: { name: "Product", present: true, counter: 1, writer: "boox" } } }],
-    books: [{ _id: "notebook:note", title: "Idea", pageIds: ["page"] }], folders: [], images: [], status: 200,
+    books: [{ _id: "notebook:note", title: "Idea", pageIds: ["page"] }], folders: [], images: [], pages: [], status: 200,
   };
   const notices: string[] = [];
   const api: any = {
@@ -34,7 +34,7 @@ function fixture(http?: (options: { url: string; headers: Record<string, string>
     PluginSettingTab: class {}, Setting: class {}, TFile: File, TFolder: Folder,
     Notice: class { constructor(message: string) { notices.push(message); } },
     normalizePath: (path: string) => path.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/\/$/, ""),
-    requestUrl: async (options: { url: string; headers: Record<string, string> }) => {
+    requestUrl: async (options: { url: string; headers: Record<string, string>; method?: string; body?: string }) => {
       if (http) return http(options);
       const { url } = options;
       const request = new URL(url);
@@ -54,6 +54,12 @@ function fixture(http?: (options: { url: string; headers: Record<string, string>
         }
         status = server.imagesStatus ?? 200;
         json = { rows: server.images.map((doc: unknown) => ({ doc })) };
+      } else if (request.pathname.endsWith("/_find")) {
+        status = server.pageStatus ?? 200;
+        const query = JSON.parse(options.body!);
+        assert.equal(options.method, "POST");
+        assert.deepEqual(query.fields, ["_id", "notebookId", "title", "updatedAt", "blocks", "deletedBlocks"]);
+        json = server.rawPages ?? { docs: server.pages.filter((page: any) => query.selector._id.$in.includes(page._id)) };
       } else if (request.searchParams.get("startkey") === '"notebook:"') {
         json = { rows: server.books.map((doc: unknown) => ({ doc })) };
       } else json = { rows: server.folders.map((doc: unknown) => ({ doc })) };
@@ -113,6 +119,32 @@ test("metadata-only notes generate entry, day and topic files and survive restar
   await next.sync(true);
   assert.deepEqual(f.snapshot(), before);
   assert.match(f.saved().projectionSource, /first\.test/);
+});
+
+test("canonical typed blocks sync without OCR and a failed page read cannot erase vault content", async () => {
+  const f = fixture(), p = f.plugin();
+  f.server.textStatus = 404;
+  f.server.pages = [{ _id: "page:page", notebookId: "note", blocks: [
+    { id: "body", kind: "md", orderKey: "1", text: "# Typed capture\n\nThe original source." },
+    { id: "v", kind: "text-version", text: "Earlier source" },
+  ] }];
+  await p.sync(true);
+  const body = f.snapshot().find(([path]) => path.includes("Entries"))![1];
+  assert.match(body, /# Typed capture\n\nThe original source\./);
+  assert.match(body, /Previous text versions/);
+  assert.match(body, /journal-date: "2026-11-11"/);
+  assert.match(body, /topics: \["Product"\]/);
+  const before = f.snapshot();
+  f.server.pageStatus = 503;
+  await p.sync(true);
+  assert.deepEqual(f.snapshot(), before);
+  assert.equal(f.trashed.length, 0);
+  assert.match(f.notices.at(-1)!, /Reading typed notes failed/);
+  f.server.pageStatus = 200;
+  f.server.rawPages = { docs: [{ _id: "page:unexpected", notebookId: "note", blocks: [] }] };
+  await p.sync(true);
+  assert.deepEqual(f.snapshot(), before);
+  assert.equal(f.trashed.length, 0);
 });
 
 const pageImage = { _id: "pageimage:page", pageId: "page", _attachments: { "page.png": { digest: "md5-abc12345", length: PNG_HEADER.length } } };

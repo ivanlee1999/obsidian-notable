@@ -5,6 +5,9 @@ import {
   type NotebookDoc,
   type PageEntry,
   type PageTextDoc,
+  type PageContentDoc,
+  flowingText,
+  isPageContentDoc,
 } from "./model.ts";
 import { fileId, notePath, renderIndex, renderNote, type ManagedKind } from "./render.ts";
 import { mergeOrganization, organizationSnapshot, type OrganizationDoc } from "./organization.ts";
@@ -24,6 +27,7 @@ export interface LibrarySnapshot {
   organization?: OrganizationDoc[];
   inkPaths?: Record<string, string>;
   inkSource?: string;
+  pageContents?: PageContentDoc[];
 }
 
 /** One note the vault should hold, fully decided. */
@@ -52,6 +56,7 @@ export class Library {
   private sideBySide = false;
   /** A page's `updatedAt` from its notebook's perspective, for staleness. Absent until known. */
   private pageClocks = new Map<string, string>();
+  private pageContents = new Map<string, PageContentDoc>();
 
   /**
    * The text half of the projection, for saving between sessions.
@@ -67,6 +72,7 @@ export class Library {
       organization: [...this.organization.values()],
       inkPaths: Object.fromEntries(this.inkPaths),
       inkSource: this.inkSource,
+      pageContents: [...this.pageContents.values()],
     };
   }
 
@@ -79,6 +85,7 @@ export class Library {
     this.applyOrganizationSnapshot(snapshot.organization ?? []);
     this.inkPaths = new Map(Object.entries(snapshot.inkPaths ?? {}));
     this.inkSource = snapshot.inkSource ?? "";
+    this.applyPageContents(snapshot.pageContents ?? []);
     for (const doc of snapshot.texts ?? []) this.applyText(doc);
     for (const [pageId, clock] of Object.entries(snapshot.pageClocks ?? {})) {
       this.pageClocks.set(pageId, clock);
@@ -88,7 +95,10 @@ export class Library {
 
   /** Whether any page text is known at all. An empty projection can plan nothing. */
   get isEmpty(): boolean {
-    return this.texts.size === 0 && this.organization.size === 0 && this.inkPaths.size === 0;
+    return this.texts.size === 0 && this.organization.size === 0 && this.inkPaths.size === 0 &&
+      ![...this.pageContents.values()].some(page => {
+        const flow = flowingText(page); return flow.text !== null || flow.versions.length > 0;
+      });
   }
 
   setInkSource(source: string): void {
@@ -132,6 +142,20 @@ export class Library {
     const id = idOf(doc._id);
     if (doc._deleted) this.texts.delete(id);
     else this.texts.set(id, doc);
+  }
+
+  applyPageContents(docs: PageContentDoc[]): void {
+    for (const doc of docs) {
+      if (!isPageContentDoc(doc)) throw new Error("Invalid cached page content; existing notes were preserved.");
+      const id = idOf(doc._id);
+      if (doc._deleted) this.pageContents.delete(id);
+      else {
+        if (this.notebooks.size > 0 && !this.notebooks.get(doc.notebookId!)?.pageIds?.includes(id)) {
+          throw new Error("A page does not belong to its notebook; existing notes were preserved.");
+        }
+        this.pageContents.set(id, doc);
+      }
+    }
   }
 
   /**
@@ -211,14 +235,19 @@ export class Library {
   private pages(notebook: NotebookDoc): PageEntry[] {
     return (notebook.pageIds ?? []).map((pageId, index) => {
       const text = this.texts.get(pageId);
-      const pageClock = millis(this.pageClocks.get(pageId));
+      const content = this.pageContents.get(pageId);
+      const owned = content?.notebookId === idOf(notebook._id) ? content : undefined;
+      const flow = owned ? flowingText(owned) : { text: null, versions: [] };
+      const pageClock = millis(owned?.updatedAt ?? this.pageClocks.get(pageId));
       const recognizedClock = millis(text?.recognizedClock);
       return {
         pageId,
         number: index + 1,
-        title: text?.pageTitle ?? null,
+        title: owned?.title ?? text?.pageTitle ?? null,
         text: text ? (text.text ?? "") : null,
         inkPath: this.inkPaths.get(pageId) ?? null,
+        flowText: flow.text,
+        previousText: flow.versions,
         // Only claimed when both clocks are actually known. Guessing here would put a warning on
         // every page of a vault whose page clocks the plugin has never been told.
         stale:
@@ -249,7 +278,8 @@ export class Library {
       const pages = this.pages(notebook);
       const notebookId = idOf(notebook._id);
       const organization = this.organization.get(notebookId);
-      if (!organization && !pages.some((page) => page.text !== null || page.inkPath)) continue;
+      if (!organization && !pages.some((page) => page.text !== null || page.inkPath ||
+        page.flowText !== null || page.previousText?.length)) continue;
       const folderPath = this.folderPath(notebook);
       const title = notebook.title?.trim() || "Untitled";
       const key = `${folderPath.join("/")}/${notebook.title ?? ""}`;

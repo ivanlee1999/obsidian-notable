@@ -1,4 +1,5 @@
 import { requestUrl } from "obsidian";
+import { isPageContentDoc, type PageContentDoc } from "./model.ts";
 
 export interface CouchConfig {
   url: string;
@@ -104,6 +105,34 @@ export class CouchClient {
     });
     if (response.status >= 400) throw new CouchReadError(response.status, `Fetching rendered ink failed with ${response.status}.`);
     return response.arrayBuffer;
+  }
+
+  /** Read only the text-bearing fields, using the built-in document-id index. */
+  async pageContents(database: string, pageIds: string[]): Promise<PageContentDoc[]> {
+    const ids = [...new Set(pageIds)].map(id => `page:${id}`);
+    const result: PageContentDoc[] = [];
+    for (let offset = 0; offset < ids.length; offset += 100) {
+      const keys = ids.slice(offset, offset + 100);
+      const response = await requestUrl({
+        url: `${this.base}/${encodeURIComponent(database)}/_find`, method: "POST",
+        headers: { ...this.headers, "Content-Type": "application/json" }, throw: false,
+        body: JSON.stringify({ selector: { _id: { $in: keys } }, limit: keys.length,
+          fields: ["_id", "notebookId", "title", "updatedAt", "blocks", "deletedBlocks"] }),
+      });
+      if (response.status >= 400) throw new CouchReadError(response.status,
+        `Reading typed notes failed with ${response.status}; existing vault notes were preserved.`);
+      const docs = (response.json as { docs?: PageContentDoc[] }).docs;
+      const seen = new Set<string>();
+      if (!Array.isArray(docs) || docs.some(doc => {
+        if (!isPageContentDoc(doc) || !keys.includes(doc._id) || seen.has(doc._id)) return true;
+        seen.add(doc._id);
+        return false;
+      })) {
+        throw new Error("Invalid page content snapshot; existing vault notes were preserved.");
+      }
+      result.push(...docs);
+    }
+    return result;
   }
 
   /**

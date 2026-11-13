@@ -186,6 +186,12 @@ export default class NotableHandwritingPlugin extends Plugin {
       current();
       next.replaceLibrary(notebooks, folders);
 
+      // Projected fields omit stroke geometry. Keep last-known blocks when a newly referenced
+      // page has not arrived yet; dropping it from the notebook remains authoritative.
+      const contents = await client.pageContents(settings.notesDatabase, [...next.livePageIds()]);
+      current();
+      next.applyPageContents(contents);
+
       let changed = 0;
       let since = sameSource ? this.settings.checkpoint : "0";
       // Drained in pages: a first sync against an established library is thousands of documents,
@@ -221,7 +227,7 @@ export default class NotableHandwritingPlugin extends Plugin {
       this.settings.checkpoint = since;
       await this.saveSettings();
       current();
-      if (announce) new Notice("Notable: no recognized text on the server yet.");
+      if (announce) new Notice("Notable: no note content on the server yet.");
       return;
     }
 

@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { Library } from "../src/projection.ts";
 import type { FolderDoc, NotebookDoc, PageTextDoc } from "../src/model.ts";
+import { flowingText } from "../src/model.ts";
 
 const notebook = (overrides: Partial<NotebookDoc> & { _id: string }): NotebookDoc => ({
   title: "Notes",
@@ -29,6 +30,41 @@ function library(): Library {
   lib.applyText(text({ _id: "pagetext:page-1" }));
   return lib;
 }
+
+test("typed blocks render without OCR and preserve their source across restart and missing arrivals", () => {
+  const lib = new Library();
+  lib.applyNotebook(notebook({ _id: "notebook:book-1" }));
+  lib.applyPageContents([{ _id: "page:page-1", notebookId: "book-1", blocks: [
+    { id: "b", kind: "md", orderKey: "20", text: "Second paragraph" },
+    { id: "a", kind: "md", orderKey: "10", text: "# First paragraph" },
+    { id: "placed", kind: "md", text: "Placed annotation", x: 10, y: 20 },
+    { id: "removed", kind: "md", text: "Deleted paragraph" },
+  ], deletedBlocks: [{ id: "removed" }] }]);
+  assert.equal(lib.isEmpty, false);
+  const before = lib.plan("Notes");
+  assert.equal(before.length, 1);
+  assert.match(before[0].contents, /# First paragraph\n\nSecond paragraph/);
+  assert.doesNotMatch(before[0].contents, /Not recognized|Placed annotation|Deleted paragraph/);
+  const restored = new Library();
+  assert.equal(restored.restore(lib.snapshot()), true);
+  restored.replaceLibrary([notebook({ _id: "notebook:book-1" })], []);
+  restored.applyPageContents([]);
+  assert.deepEqual(restored.plan("Notes"), before);
+  restored.applyPageContents([{ _id: "page:page-1", notebookId: "book-1", blocks: [] }]);
+  assert.deepEqual(restored.plan("Notes"), []);
+});
+
+test("flow ordering is bytewise and recovered sources are separate, deduplicated and remove-wins", () => {
+  const flow = flowingText({ _id: "page:p", notebookId: "b", blocks: [
+    { id: "astral", kind: "md", orderKey: "😀", text: "last" },
+    { id: "bmp", kind: "md", orderKey: "\uE000", text: "first", x: 4 },
+    { id: "text-version:p:b", kind: "text-version", text: "previous" },
+    { id: "text-version:p:a", kind: "text-version", text: "previous" },
+    { id: "text-version:p:c", kind: "text-version", text: "last" },
+    { id: "text-version:p:d", kind: "text-version", text: "removed version" },
+  ], deletedBlocks: [{ id: "text-version:p:d" }] });
+  assert.deepEqual(flow, { text: "first\n\nlast", versions: ["previous"] });
+});
 
 test("a notebook with recognized text becomes one note", () => {
   const plan = library().plan("Handwritten");
