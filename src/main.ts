@@ -343,9 +343,13 @@ export default class NotableHandwritingPlugin extends Plugin {
       // Absence is not a deletion: keep note files when ink has not arrived or a library was reset.
       if (kind === "notebook" && !identities.has(identity) && !this.library.isTrashed(id)) continue;
       const file = this.app.vault.getAbstractFileByPath(path);
-      if (file instanceof TFile && managedIdentity(await this.app.vault.read(file), source) === identity) {
+      if (file instanceof TFile) {
+        const contents = await this.app.vault.read(file);
         current();
-        await this.preserveEdited(file, identity, await this.app.vault.read(file), current);
+        if (managedIdentity(contents, source) !== identity) continue;
+        await this.preserveEdited(file, identity, contents, current);
+        current();
+        if (await this.app.vault.read(file) !== contents) throw new Error("A note changed during sync; existing content was preserved.");
         current();
         await this.app.vault.trash(file, true);
         current();

@@ -85,6 +85,7 @@ function fixture(http?: (options: { url: string; headers: Record<string, string>
         return file.contents;
       },
       create: async (path: string, contents: string) => {
+        await server.beforeCreate?.(path);
         if (files.has(path)) throw new Error("File already exists");
         const file = new File(path, contents); files.set(path, file); return file;
       },
@@ -205,6 +206,26 @@ test("a hand edit during the final atomic write is preserved and retried", async
   delete f.server.beforeProcess;
   await p.sync(true);
   assert.ok(f.snapshot().some(([path, contents]) => path.includes("/_recovered/") && contents === edited[1]));
+});
+
+test("a hand edit during recovery prevents cleanup from trashing the changed note", async () => {
+  const f = fixture(), p = f.plugin();
+  await p.sync(true);
+  const topic = [...f.files.values()].find(file => file instanceof File && file.path.includes("/Topics/")) as File;
+  assert.ok(topic);
+  topic.contents += "\nMy topic notes\n";
+  f.server.org[0].topics.product = { name: "Product", present: false, counter: 2, writer: "ipad" };
+  f.server.beforeCreate = async (path: string) => {
+    if (path.includes("/_recovered/")) topic.contents += "\nConcurrent topic edit\n";
+  };
+  await p.sync(true);
+  assert.match(f.notices.at(-1)!, /changed during sync/);
+  assert.equal(f.files.get(topic.path), topic);
+  const edited = topic.contents;
+  delete f.server.beforeCreate;
+  await p.sync(true);
+  assert.ok(f.snapshot().some(([path, contents]) => path.includes("/_recovered/") && contents === edited));
+  assert.ok(f.trashed.some(file => file.contents === edited));
 });
 
 const pageImage = { _id: "pageimage:page", pageId: "page", _attachments: { "page.png": { digest: "md5-abc12345", length: PNG_HEADER.length } } };
