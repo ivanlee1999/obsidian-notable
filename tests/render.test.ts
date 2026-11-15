@@ -90,7 +90,7 @@ test("a page with no writing on it reads differently from one never recognized",
   assert.doesNotMatch(note, /Not recognized yet/);
 });
 
-test("stale text is flagged in a comment, not in the prose", () => {
+test("stale text stays available with a visible updating indicator", () => {
   const note = renderNote({
     notebookId: "book-1",
     title: "Notes",
@@ -98,8 +98,21 @@ test("stale text is flagged in a comment, not in the prose", () => {
   });
 
   assert.match(note, /<!-- This page has been written on since it was last recognized\. -->/);
+  assert.match(note, /\*Updating handwriting transcription…\*/);
   // The writing itself must still read as the writing.
   assert.match(note, /milk, eggs/);
+});
+
+test("updating handwriting never replaces typed text or describes a stale blank as current", () => {
+  const mixed = renderNote({ notebookId: "b", title: "N", pages: [
+    page({ stale: true, flowText: "My exact typed source", text: "old handwriting" }),
+  ] });
+  assert.match(mixed, /My exact typed source/);
+  assert.match(mixed, /### Handwriting\n\n[\s\S]*Updating handwriting transcription…[\s\S]*old handwriting/);
+
+  const blank = renderNote({ notebookId: "b", title: "N", pages: [page({ stale: true, text: "" })] });
+  assert.match(blank, /Updating handwriting transcription/);
+  assert.doesNotMatch(blank, /No handwriting found/);
 });
 
 test("rendering is deterministic, so a replay rewrites the same bytes", () => {

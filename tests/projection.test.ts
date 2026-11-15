@@ -167,6 +167,37 @@ test("an unknown page clock is not treated as staleness", () => {
   assert.doesNotMatch(library().plan("Handwritten")[0].contents, /written on since/);
 });
 
+test("exact source revisions detect new ink even when clocks stay equal or move backwards", () => {
+  for (const updatedAt of ["2026-08-18T04:00:00.000Z", "2026-08-18T03:00:00.000Z"]) {
+    const lib = library();
+    lib.applyText(text({ _id: "pagetext:page-1", sourceRev: "2-old" }));
+    lib.applyPageContents([{ _id: "page:page-1", _rev: "3-new", notebookId: "book-1", updatedAt }]);
+    const note = lib.plan("Handwritten")[0].contents;
+    assert.match(note, /Updating handwriting transcription/);
+    assert.match(note, /milk, eggs/);
+
+    lib.applyText(text({ _id: "pagetext:page-1", sourceRev: "3-new", text: "milk, eggs, bread" }));
+    const current = lib.plan("Handwritten")[0].contents;
+    assert.doesNotMatch(current, /Updating handwriting transcription/);
+    assert.match(current, /milk, eggs, bread/);
+  }
+});
+
+test("revision-aware recognition remains marked updating until its source is known, including after restart", () => {
+  const lib = library();
+  lib.applyText(text({ _id: "pagetext:page-1", sourceRev: "2-current" }));
+  assert.match(lib.plan("Handwritten")[0].contents, /Updating handwriting transcription/);
+  lib.applyPageContents([{ _id: "page:page-1", _rev: "2-current", notebookId: "book-1" }]);
+  assert.doesNotMatch(lib.plan("Handwritten")[0].contents, /Updating handwriting transcription/);
+
+  const restored = new Library();
+  restored.restore(lib.snapshot());
+  restored.replaceLibrary([notebook({ _id: "notebook:book-1" })], []);
+  assert.deepEqual(restored.plan("Handwritten"), lib.plan("Handwritten"));
+  restored.applyPageContents([{ _id: "page:page-1", _rev: "3-new", notebookId: "book-1" }]);
+  assert.match(restored.plan("Handwritten")[0].contents, /Updating handwriting transcription/);
+});
+
 test("a deleted text document removes its text without removing the note", () => {
   const lib = new Library();
   lib.applyNotebook(notebook({ _id: "notebook:book-1", pageIds: ["p1", "p2"] }));

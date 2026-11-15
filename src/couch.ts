@@ -117,7 +117,7 @@ export class CouchClient {
         url: `${this.base}/${encodeURIComponent(database)}/_find`, method: "POST",
         headers: { ...this.headers, "Content-Type": "application/json" }, throw: false,
         body: JSON.stringify({ selector: { _id: { $in: keys } }, limit: keys.length,
-          fields: ["_id", "notebookId", "title", "updatedAt", "blocks", "deletedBlocks"] }),
+          fields: ["_id", "_rev", "notebookId", "title", "updatedAt", "blocks", "deletedBlocks"] }),
       });
       if (response.status >= 400) throw new CouchReadError(response.status,
         `Reading typed notes failed with ${response.status}; existing vault notes were preserved.`);

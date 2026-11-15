@@ -60,10 +60,14 @@ function renderPage(page: PageEntry, sideBySide: boolean): string {
     : `## Page ${page.number}`;
   const image = page.inkPath ? `![[${page.inkPath}]]` : "";
   const content = (text: string) => `${heading}\n\n${sideBySide && image ? `${image}\n\n` : ""}${text}${!sideBySide && image ? `\n\n${image}` : ""}`;
+  const staleness = page.stale
+    ? "<!-- This page has been written on since it was last recognized. -->\n*Updating handwriting transcription…*\n\n"
+    : "";
 
   if (page.flowText != null || page.previousText?.length) {
     const parts = page.flowText != null ? [page.flowText] : [];
-    if (page.text?.trim()) parts.push(`### Handwriting\n\n${page.text.trim()}`);
+    if (page.text?.trim()) parts.push(`### Handwriting\n\n${staleness}${page.text.trim()}`);
+    else if (staleness) parts.push(staleness.trim());
     if (page.previousText?.length) {
       const sources = page.previousText.map(source => {
         const longestFence = (source.match(/`+/g) ?? []).reduce((length, run) => Math.max(length, run.length), 2);
@@ -79,14 +83,9 @@ function renderPage(page: PageEntry, sideBySide: boolean): string {
     return content("*Not recognized yet.*");
   }
   if (page.text.trim() === "") {
-    return content("*No handwriting found on this page.*");
+    return content(staleness.trim() || "*No handwriting found on this page.*");
   }
 
-  // Said in a comment rather than in the prose: it is a fact about the sync, not about the note,
-  // and a reader skimming their own writing should not have to read past a warning to reach it.
-  const staleness = page.stale
-    ? "<!-- This page has been written on since it was last recognized. -->\n"
-    : "";
   return content(`${staleness}${page.text.trim()}`);
 }
 

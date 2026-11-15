@@ -248,10 +248,11 @@ export class Library {
         inkPath: this.inkPaths.get(pageId) ?? null,
         flowText: flow.text,
         previousText: flow.versions,
-        // Only claimed when both clocks are actually known. Guessing here would put a warning on
-        // every page of a vault whose page clocks the plugin has never been told.
-        stale:
-          pageClock !== null && recognizedClock !== null && pageClock > recognizedClock,
+        // Revision-aware results require an exact source match, including after equal-clock
+        // edits. Older recognition documents keep their clock-based compatibility behavior.
+        stale: text?.sourceRev !== undefined
+          ? !owned?._rev || text.sourceRev !== owned._rev
+          : pageClock !== null && recognizedClock !== null && pageClock > recognizedClock,
       };
     });
   }

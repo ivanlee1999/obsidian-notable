@@ -58,7 +58,7 @@ function fixture(http?: (options: { url: string; headers: Record<string, string>
         status = server.pageStatus ?? 200;
         const query = JSON.parse(options.body!);
         assert.equal(options.method, "POST");
-        assert.deepEqual(query.fields, ["_id", "notebookId", "title", "updatedAt", "blocks", "deletedBlocks"]);
+        assert.deepEqual(query.fields, ["_id", "_rev", "notebookId", "title", "updatedAt", "blocks", "deletedBlocks"]);
         json = server.rawPages ?? { docs: server.pages.filter((page: any) => query.selector._id.$in.includes(page._id)) };
       } else if (request.searchParams.get("startkey") === '"notebook:"') {
         json = { rows: server.books.map((doc: unknown) => ({ doc })) };
@@ -412,10 +412,15 @@ test("real CouchDB metadata pulls, removals and outage preserve the vault", {
   try {
     for (const name of databases) await put(name);
     await put(`${database}/notebook:note`, { title: "Live journal entry", pageIds: ["page"] });
-    await put(`${database}/page:page`, { notebookId: "note", blocks: [
+    const page = { notebookId: "note", updatedAt: "2026-11-11T12:00:00.000Z", blocks: [
       { id: "body", kind: "md", orderKey: "1", text: "Live typed source\n\nSecond paragraph." },
       { id: "history", kind: "text-version", text: "Earlier exact source" },
-    ], deletedBlocks: [] });
+    ], deletedBlocks: [] };
+    const pageRevision = await put(`${database}/page:page`, page);
+    const recognition = { pageId: "page", notebookId: "note", text: "First handwriting transcript",
+      sourceRev: pageRevision.rev, sourceFingerprint: "sha256:test", pipelineVersion: "scribe-v2:test",
+      recognizedClock: page.updatedAt };
+    const textRevision = await put(`${database}_text/pagetext:page`, recognition);
     let organization = { type: "journal", schema: 1, notebookId: "note", date: "2026-11-11", createdAt: 1,
       topics: { product: { name: "Product", present: true, counter: 1, writer: "boox" } } };
     const initial = await put(`${database}_organization/journal:note`, organization);
@@ -430,6 +435,24 @@ test("real CouchDB metadata pulls, removals and outage preserve the vault", {
     const typed = f.snapshot().find(([path]) => path.includes("/Entries/"))![1];
     assert.match(typed, /Live typed source\n\nSecond paragraph\./);
     assert.match(typed, /Earlier exact source/);
+    assert.match(typed, /First handwriting transcript/);
+    assert.doesNotMatch(typed, /Updating handwriting transcription/);
+    const nextPageRevision = await put(`${database}/page:page`, { ...page, _rev: pageRevision.rev,
+      title: "New ink revision with the same clock" });
+    await p.sync(true);
+    const updating = f.snapshot().find(([path]) => path.includes("/Entries/"))![1];
+    assert.match(updating, /Updating handwriting transcription/);
+    assert.match(updating, /First handwriting transcript/);
+    assert.match(updating, /Live typed source/);
+    assert.match(updating, /topics: \["Product"\]/);
+    assert.match(updating, /journal-date: "2026-11-11"/);
+    await put(`${database}_text/pagetext:page`, { ...recognition, _rev: textRevision.rev,
+      sourceRev: nextPageRevision.rev, text: "Updated handwriting transcript" });
+    await p.sync(true);
+    const refreshed = f.snapshot().find(([path]) => path.includes("/Entries/"))![1];
+    assert.match(refreshed, /Updated handwriting transcript/);
+    assert.doesNotMatch(refreshed, /First handwriting transcript|Updating handwriting transcription/);
+    assert.match(refreshed, /Earlier exact source/);
     organization = { ...organization, topics: { product: { name: "Product", present: false, counter: 2, writer: "ipad" } } };
     await put(`${database}_organization/journal:note`, { ...organization, _rev: initial.rev });
     await p.sync(true);

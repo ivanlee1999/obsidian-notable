@@ -24,6 +24,10 @@ export interface PageTextDoc {
   language?: string | null;
   /** The page's `updatedAt` when the recognition ran. Text is stale once the page moves past it. */
   recognizedClock?: string;
+  /** Exact library page revision validated by the recognition worker. */
+  sourceRev?: string;
+  sourceFingerprint?: string;
+  pipelineVersion?: string;
   updatedAt?: string;
   updatedBy?: string;
 }
@@ -58,6 +62,7 @@ export interface FolderDoc {
 /** Projected from the library database: no stroke geometry or binary assets. */
 export interface PageContentDoc {
   _id: string;
+  _rev?: string;
   _deleted?: boolean;
   notebookId?: string;
   title?: string | null;
@@ -77,6 +82,7 @@ export function isPageContentDoc(value: unknown): value is PageContentDoc {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const page = value as PageContentDoc;
   return typeof page._id === "string" && page._id.startsWith("page:") &&
+    (page._rev === undefined || (typeof page._rev === "string" && page._rev.length > 0)) &&
     (page._deleted === true || typeof page.notebookId === "string") &&
     (page.title == null || typeof page.title === "string") &&
     (page.updatedAt == null || typeof page.updatedAt === "string") &&
