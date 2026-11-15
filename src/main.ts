@@ -39,6 +39,7 @@ interface Settings {
 interface PersistedProjection {
   projection?: LibrarySnapshot;
   projectionSource?: string;
+  writtenHashes?: Record<string, string>;
 }
 
 const DEFAULTS: Settings = {
@@ -63,6 +64,7 @@ export default class NotableHandwritingPlugin extends Plugin {
   private projectionSource = "";
   private lastFailure: string | null = null;
   private disposed = false;
+  private writtenHashes = new Map<string, string>();
 
   async onload(): Promise<void> {
     this.disposed = false;
@@ -110,6 +112,8 @@ export default class NotableHandwritingPlugin extends Plugin {
     this.projectionSource = source;
     let restored = false;
     if (data?.projectionSource === source) {
+      this.writtenHashes = new Map(Object.entries(data.writtenHashes ?? {})
+        .filter(([, hash]) => typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash)));
       try { restored = this.library.restore(data?.projection); }
       catch (error) { console.warn("Notable: invalid cached metadata; re-reading without changing vault files.", error); }
     }
@@ -125,7 +129,8 @@ export default class NotableHandwritingPlugin extends Plugin {
     if (this.disposed) return;
     // The projection rides with the settings so the two can never be written apart. It holds
     // only page text, which is already in the vault — nothing here is a second source of truth.
-    await this.saveData({ ...this.settings, projection: this.library.snapshot(), projectionSource: this.projectionSource });
+    await this.saveData({ ...this.settings, projection: this.library.snapshot(), projectionSource: this.projectionSource,
+      writtenHashes: Object.fromEntries(this.writtenHashes) });
   }
 
   /** Forgets the checkpoint and reads everything again. The repair for a vault that drifted. */
@@ -217,6 +222,7 @@ export default class NotableHandwritingPlugin extends Plugin {
       current();
       next.setSideBySide(settings.sideBySide);
       this.library = next;
+      if (!sameSource) this.writtenHashes.clear();
       this.projectionSource = source;
       this.lastFailure = null;
 
@@ -307,7 +313,7 @@ export default class NotableHandwritingPlugin extends Plugin {
     const source = fileId(this.projectionSource);
     const owned = new Map<string, string | null>();
     for (const file of this.app.vault.getMarkdownFiles()) {
-      if (file.path.startsWith(`${root}/`)) {
+      if (file.path.startsWith(`${root}/`) && !file.path.startsWith(`${root}/_recovered/`)) {
         const contents = await this.app.vault.read(file);
         current();
         owned.set(file.path, managedIdentity(contents, source));
@@ -335,6 +341,8 @@ export default class NotableHandwritingPlugin extends Plugin {
       if (kind === "notebook" && !identities.has(identity) && !this.library.isTrashed(id)) continue;
       const file = this.app.vault.getAbstractFileByPath(path);
       if (file instanceof TFile && managedIdentity(await this.app.vault.read(file), source) === identity) {
+        current();
+        await this.preserveEdited(file, identity, await this.app.vault.read(file), current);
         current();
         await this.app.vault.trash(file, true);
         current();
@@ -372,16 +380,46 @@ export default class NotableHandwritingPlugin extends Plugin {
     if (file instanceof TFile) {
       const contents = await this.app.vault.read(file);
       current();
-      if (contents === note.contents) return false;
+      if (contents === note.contents) {
+        this.writtenHashes.set(identity, await this.contentHash(contents));
+        return false;
+      }
       if (managedIdentity(contents, source) !== identity) throw new Error("A file changed during sync; existing content was preserved.");
-      await this.app.vault.modify(file, note.contents);
+      await this.preserveEdited(file, identity, contents, current);
+      current();
+      await this.app.vault.process(file, latest => {
+        current();
+        if (latest !== contents) throw new Error("A note changed during sync; existing content was preserved.");
+        return note.contents;
+      });
+      this.writtenHashes.set(identity, await this.contentHash(note.contents));
       return true;
     }
 
     await this.ensureFolder(path, current);
     current();
     await this.app.vault.create(path, note.contents);
+    this.writtenHashes.set(identity, await this.contentHash(note.contents));
     return true;
+  }
+
+  private async contentHash(contents: string): Promise<string> {
+    const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(contents));
+    return Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  /** Unknown pre-upgrade files are preserved once too; recovery copies are never sync targets. */
+  private async preserveEdited(file: TFile, identity: string, contents: string, current: () => void): Promise<void> {
+    const hash = await this.contentHash(contents);
+    current();
+    if (this.writtenHashes.get(identity) === hash) return;
+    const path = `${normalizePath(this.settings.folder)}/_recovered/${fileId(identity)}-${hash}.md`;
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing instanceof TFile && await this.app.vault.read(existing) === contents) return;
+    if (existing) throw new Error("A recovery path is occupied; existing notes were preserved.");
+    await this.ensureFolder(path, current);
+    current();
+    await this.app.vault.create(path, contents);
   }
 
   private async ensureFolder(path: string, current: () => void): Promise<void> {

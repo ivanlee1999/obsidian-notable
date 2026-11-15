@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import vm from "node:vm";
+import { webcrypto } from "node:crypto";
 import { buildSync } from "esbuild";
 import { fileId, renderNote } from "../src/render.ts";
 
@@ -69,7 +70,7 @@ function fixture(http?: (options: { url: string; headers: Record<string, string>
   const module = { exports: {} as any };
   vm.runInNewContext(bundle, { module, exports: module.exports, require: () => api, URL, TextEncoder,
     btoa: (value: string) => Buffer.from(value).toString("base64"),
-    console: { warn() {}, error() {} }, setTimeout, clearTimeout });
+    crypto: webcrypto, console: { warn() {}, error() {} }, setTimeout, clearTimeout });
   const Plugin = module.exports.default;
   function plugin() {
     const result = new Plugin();
@@ -78,6 +79,11 @@ function fixture(http?: (options: { url: string; headers: Record<string, string>
       getAbstractFileByPath: (path: string) => files.get(path) ?? null,
       read: async (file: File) => file.contents,
       modify: async (file: File, contents: string) => { file.contents = contents; },
+      process: async (file: File, change: (contents: string) => string) => {
+        await server.beforeProcess?.(file);
+        file.contents = change(file.contents);
+        return file.contents;
+      },
       create: async (path: string, contents: string) => {
         if (files.has(path)) throw new Error("File already exists");
         const file = new File(path, contents); files.set(path, file); return file;
@@ -145,6 +151,59 @@ test("canonical typed blocks sync without OCR and a failed page read cannot eras
   await p.sync(true);
   assert.deepEqual(f.snapshot(), before);
   assert.equal(f.trashed.length, 0);
+});
+
+test("hand edits in managed notes are recovered exactly and never become sync targets", async () => {
+  const f = fixture(), p = f.plugin();
+  f.server.pages = [{ _id: "page:page", notebookId: "note", blocks: [
+    { id: "body", kind: "md", text: "First synced source" },
+  ] }];
+  await p.sync(true);
+  const entry = [...f.files.values()].find(file => file instanceof File && file.path.includes("/Entries/")) as File;
+  entry.contents += "\n\nMy hand-edited thoughts #personal\n";
+  const manual = entry.contents;
+  f.server.pages[0].blocks[0].text = "Second synced source";
+  await p.sync(true);
+  assert.match(entry.contents, /Second synced source/);
+  const recovered = f.snapshot().filter(([path]) => path.includes("/_recovered/"));
+  assert.equal(recovered.length, 1);
+  assert.equal(recovered[0][1], manual);
+
+  const restarted = f.plugin();
+  await restarted.loadSettings();
+  f.server.pages[0].blocks[0].text = "Third synced source";
+  await restarted.sync(true);
+  assert.match(entry.contents, /Third synced source/);
+  assert.deepEqual(f.snapshot().filter(([path]) => path.includes("/_recovered/")), recovered);
+  assert.equal(f.trashed.some(file => file.path.includes("/_recovered/")), false);
+});
+
+test("pre-upgrade managed files are preserved before their first replacement", async () => {
+  const f = fixture(), p = f.plugin();
+  await p.sync(true);
+  delete f.saved().writtenHashes;
+  const before = f.snapshot();
+  const restarted = f.plugin();
+  await restarted.loadSettings();
+  f.server.books[0].title = "Renamed after upgrade";
+  await restarted.sync(true);
+  const backups = f.snapshot().filter(([path]) => path.includes("/_recovered/"));
+  assert.ok(backups.length > 0);
+  for (const [, contents] of backups) assert.ok(before.some(([, original]) => original === contents));
+});
+
+test("a hand edit during the final atomic write is preserved and retried", async () => {
+  const f = fixture(), p = f.plugin();
+  await p.sync(true);
+  f.server.books[0].title = "Server rename";
+  f.server.beforeProcess = async (file: File) => { file.contents += "\nConcurrent hand edit\n"; };
+  await p.sync(true);
+  assert.match(f.notices.at(-1)!, /changed during sync/);
+  const edited = f.snapshot().find(([, contents]) => contents.includes("Concurrent hand edit"));
+  assert.ok(edited);
+  delete f.server.beforeProcess;
+  await p.sync(true);
+  assert.ok(f.snapshot().some(([path, contents]) => path.includes("/_recovered/") && contents === edited[1]));
 });
 
 const pageImage = { _id: "pageimage:page", pageId: "page", _attachments: { "page.png": { digest: "md5-abc12345", length: PNG_HEADER.length } } };
