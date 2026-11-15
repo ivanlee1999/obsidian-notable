@@ -368,7 +368,8 @@ export default class NotableHandwritingPlugin extends Plugin {
   private async writeNote(path: string, note: PlannedNote, owned: Map<string, string | null>, source: string, current: () => void): Promise<boolean> {
     current();
     const identity = JSON.stringify([note.kind ?? "notebook", note.notebookId]);
-    const existingPath = [...owned].find(([, owner]) => owner === identity)?.[0];
+    const existingPath = owned.get(path) === identity ? path
+      : [...owned].find(([, owner]) => owner === identity)?.[0];
     const existing = existingPath ? this.app.vault.getAbstractFileByPath(existingPath) : null;
 
     if (existing instanceof TFile && existing.path !== path) {

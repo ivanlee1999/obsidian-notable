@@ -194,6 +194,25 @@ test("pre-upgrade managed files are preserved before their first replacement", a
   for (const [, contents] of backups) assert.ok(before.some(([, original]) => original === contents));
 });
 
+test("duplicate legacy exports use the intended destination and preserve the extra copy", async () => {
+  const f = fixture(), p = f.plugin();
+  await p.sync(true);
+  const entry = [...f.files.values()].find(file => file instanceof File && file.path.includes("/Entries/")) as File;
+  assert.ok(entry);
+  const preserved = entry.contents.replace(/^notable-source:.*\n/m, "") + "\nMy old export edits\n";
+  // Reproduce an old duplicate arriving before the current destination in the vault listing.
+  const duplicate = new File("Handwritten/Another old export.md", preserved);
+  const files = [...f.files.entries()];
+  f.files.clear();
+  f.files.set(duplicate.path, duplicate);
+  for (const [path, file] of files) f.files.set(path, file);
+  await p.sync(true);
+  assert.doesNotMatch(f.notices.at(-1)!, /changed during sync/);
+  assert.equal(f.files.get(entry.path), entry);
+  assert.ok(f.snapshot().some(([path, contents]) => path.includes("/_recovered/") && contents === preserved));
+  assert.ok(f.trashed.includes(duplicate));
+});
+
 test("a hand edit during the final atomic write is preserved and retried", async () => {
   const f = fixture(), p = f.plugin();
   await p.sync(true);
