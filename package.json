@@ -1,6 +1,6 @@
 {
   "name": "obsidian-notable",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Brings typed notes, handwriting, journal dates, and tags from Notable and Bopa into your vault.",
   "main": "main.js",
   "scripts": {

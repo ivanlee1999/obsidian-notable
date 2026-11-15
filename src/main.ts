@@ -65,6 +65,7 @@ export default class NotableHandwritingPlugin extends Plugin {
   private lastFailure: string | null = null;
   private disposed = false;
   private writtenHashes = new Map<string, string>();
+  private recoveredCopies = 0;
 
   async onload(): Promise<void> {
     this.disposed = false;
@@ -156,6 +157,7 @@ export default class NotableHandwritingPlugin extends Plugin {
     }
 
     this.syncing = true;
+    this.recoveredCopies = 0;
     const settings = { ...this.settings };
     const obsolete = () => this.disposed ||
       (["url", "username", "password", "notesDatabase", "textDatabase", "imagesDatabase", "folder", "sideBySide"] as const)
@@ -246,6 +248,7 @@ export default class NotableHandwritingPlugin extends Plugin {
       await this.saveSettings();
       current();
 
+      if (this.recoveredCopies > 0) new Notice(`Notable: saved ${this.recoveredCopies} edited note${this.recoveredCopies === 1 ? "" : "s"} in ${normalizePath(settings.folder)}/_recovered.`);
       if (announce) {
         new Notice(
           written === 0 && changed === 0
@@ -420,6 +423,7 @@ export default class NotableHandwritingPlugin extends Plugin {
     await this.ensureFolder(path, current);
     current();
     await this.app.vault.create(path, contents);
+    this.recoveredCopies += 1;
   }
 
   private async ensureFolder(path: string, current: () => void): Promise<void> {

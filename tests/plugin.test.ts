@@ -168,6 +168,7 @@ test("hand edits in managed notes are recovered exactly and never become sync ta
   const recovered = f.snapshot().filter(([path]) => path.includes("/_recovered/"));
   assert.equal(recovered.length, 1);
   assert.equal(recovered[0][1], manual);
+  assert.ok(f.notices.some(message => /saved 1 edited note.*_recovered/.test(message)));
 
   const restarted = f.plugin();
   await restarted.loadSettings();
