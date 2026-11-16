@@ -56,7 +56,7 @@ export function pageHeadingTitle(page: PageEntry): string | null {
 function renderPage(page: PageEntry, sideBySide: boolean): string {
   const title = pageHeadingTitle(page);
   const heading = title
-    ? `## Page ${page.number} — ${title}`
+    ? `## Page ${page.number} — ${escapeMarkdownText(title)}`
     : `## Page ${page.number}`;
   const image = page.inkPath ? `![[${page.inkPath}]]` : "";
   const content = (text: string) => `${heading}\n\n${sideBySide && image ? `${image}\n\n` : ""}${text}${!sideBySide && image ? `\n\n${image}` : ""}`;
@@ -66,7 +66,7 @@ function renderPage(page: PageEntry, sideBySide: boolean): string {
 
   if (page.flowText != null || page.previousText?.length) {
     const parts = page.flowText != null ? [page.flowText] : [];
-    if (page.text?.trim()) parts.push(`### Handwriting\n\n${staleness}${page.text.trim()}`);
+    if (page.text?.trim()) parts.push(`### Handwriting\n\n${staleness}${transcriptMarkdown(page.text, page.format)}`);
     else if (staleness) parts.push(staleness.trim());
     if (page.previousText?.length) {
       const sources = page.previousText.map(source => {
@@ -86,7 +86,7 @@ function renderPage(page: PageEntry, sideBySide: boolean): string {
     return content(staleness.trim() || "*No handwriting found on this page.*");
   }
 
-  return content(`${staleness}${page.text.trim()}`);
+  return content(`${staleness}${transcriptMarkdown(page.text, page.format)}`);
 }
 
 /**
@@ -189,4 +189,67 @@ export function notePath(
   const suffix = collides ? ` ~${notebookId.slice(0, 8)}` : "";
   const segments = [root, ...folderPath.map(sanitizeFilename), `${name}${suffix}.md`];
   return segments.filter((segment) => segment.length > 0).join("/");
+}
+
+/** Derived text supports structure, never vault embeds, HTML, queries or new inline tags.
+ * Canonical typed Markdown does not pass through this renderer. */
+export function escapeMarkdownText(source: string): string {
+  return source.replace(/\\/g, "\\\\")
+    .replace(/[&<>\[\]#^%$`]/g, character => `&#${character.charCodeAt(0)};`)
+    .replace(/[*_{}|~]/g, "\\$&");
+}
+
+function literal(line: string): string {
+  return escapeMarkdownText(line).replace(/^(\s*)([-+])(?=\s|$)/, "$1\\$2")
+    .replace(/^(\s*\d+)([.)])(?=\s)/, "$1\\$2")
+    .replace(/^-{3,}\s*$/, value => "\\" + value);
+}
+
+/** Split real cell separators, retaining escaped pipes/backslashes and empty cells. */
+function cells(line: string): string[] | null {
+  const text = line.trim(), result: string[] = [];
+  let cell = "", separators = 0, lastWasSeparator = false;
+  for (let i = 0; i < text.length; i++) {
+    const character = text[i];
+    if (character === "\\" && /[\\|]/.test(text[i + 1] ?? "")) {
+      cell += text[++i]; lastWasSeparator = false;
+    } else if (character === "|") {
+      result.push(cell.trim()); cell = ""; separators++; lastWasSeparator = true;
+    } else { cell += character; lastWasSeparator = false; }
+  }
+  if (!separators) return null;
+  result.push(cell.trim());
+  if (text.startsWith("|")) result.shift();
+  if (lastWasSeparator) result.pop();
+  return result.length ? result : null;
+}
+
+export function transcriptMarkdown(source: string, format?: string): string {
+  const lines = source.trim().replace(/\r\n?/g, "\n").split("\n");
+  if (format !== "markdown") return lines.map(literal).join("  \n");
+  const output: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const header = cells(lines[i]), divider = cells(lines[i + 1] ?? "");
+    if (header && divider?.length === header.length && divider.every(cell => /^:?-{3,}:?$/.test(cell))) {
+      if (output.length && output.at(-1) !== "") output.push("");
+      const row = (values: string[]) => `| ${values.map(escapeMarkdownText).join(" | ")} |`;
+      output.push(row(header), `| ${divider.join(" | ")} |`); i++;
+      while (i + 1 < lines.length) {
+        const body = cells(lines[i + 1]);
+        if (!body || body.length !== header.length) break;
+        output.push(row(body)); i++;
+      }
+      output.push(""); continue;
+    }
+    const heading = /^\s{0,3}(#{1,6})\s+(.*)$/.exec(lines[i]);
+    if (heading) { output.push(`${heading[1]} ${escapeMarkdownText(heading[2])}`); continue; }
+    const list = /^(\s*)([-+*]|\d+[.)])\s+(?:\[([ xX])\](?:\s+|$))?(.*)$/.exec(lines[i]);
+    if (list) {
+      const marker = /^\d/.test(list[2]) ? list[2].replace(/\)$/, ".") : "-";
+      const task = list[3] === undefined ? "" : `[${list[3].toLowerCase()}] `;
+      output.push(`${list[1]}${marker} ${task}${escapeMarkdownText(list[4])}`); continue;
+    }
+    output.push(literal(lines[i]));
+  }
+  return output.join("\n").trim();
 }

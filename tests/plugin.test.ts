@@ -46,7 +46,9 @@ function fixture(http?: (options: { url: string; headers: Record<string, string>
         json = server.rawOrganization ?? { rows: server.org.map((doc: unknown) => ({ doc })) };
       } else if (request.pathname.includes("notes_text")) {
         status = server.textStatus ?? 200;
-        json = { results: [], last_seq: "0" };
+        const sequence = server.textSequence ?? "0";
+        json = { results: request.searchParams.get("since") === sequence ? []
+          : (server.texts ?? []).map((doc: any) => ({ id: doc._id, doc })), last_seq: sequence };
       } else if (request.pathname.includes("notes_images")) {
         if (request.pathname.endsWith("/page.png")) {
           await server.beforeImage?.();
@@ -126,6 +128,35 @@ test("metadata-only notes generate entry, day and topic files and survive restar
   await next.sync(true);
   assert.deepEqual(f.snapshot(), before);
   assert.match(f.saved().projectionSource, /first\.test/);
+});
+
+test("structured recognition refreshes through real plugin projection while preserving typed text and manual edits", async () => {
+  const f = fixture(), p = f.plugin();
+  f.server.pages = [{ _id: "page:page", _rev: "1-ink", notebookId: "note", blocks: [
+    { id: "body", kind: "md", text: "# Exact typed source\n\n- [x] Original typed task" },
+  ] }];
+  const text = { _id: "pagetext:page", notebookId: "note", pageId: "page", sourceRev: "1-ink", format: "markdown",
+    text: "# Project\n- [ ] Next\n\n| Item | Qty |\n| --- | ---: |\n| Milk | 2 |" };
+  f.server.texts = [text]; f.server.textSequence = "1";
+  await p.sync(true);
+  const entry = [...f.files.values()].find(file => file instanceof File && file.path.includes("/Entries/")) as File;
+  assert.ok(entry.contents.includes(text.text));
+  entry.contents += "\nMy manual annotation stays.\n";
+  const manual = entry.contents;
+  f.server.pages[0]._rev = "2-ink";
+  await p.sync(true);
+  assert.match(entry.contents, /Updating handwriting transcription/);
+  f.server.texts = [{ ...text, sourceRev: "2-ink", text: text.text.replace("[ ]", "[x]").replace("Milk | 2", "Milk | 3") }];
+  f.server.textSequence = "2";
+  await p.sync(true);
+  assert.match(entry.contents, /# Project\n- \[x\] Next/);
+  assert.match(entry.contents, /Milk \| 3/);
+  assert.doesNotMatch(entry.contents, /Updating handwriting transcription|Milk \| 2/);
+  assert.match(entry.contents, /# Exact typed source\n\n- \[x\] Original typed task/);
+  assert.match(entry.contents, /topics: \["Product"\]/);
+  assert.match(entry.contents, /journal-date: "2026-11-11"/);
+  assert.ok(f.snapshot().some(([path, contents]) => path.includes("/_recovered/") && contents === manual));
+  assert.equal(f.server.pages[0].blocks[0].text, "# Exact typed source\n\n- [x] Original typed task");
 });
 
 test("canonical typed blocks sync without OCR and a failed page read cannot erase vault content", async () => {
@@ -547,10 +578,13 @@ test("real CouchDB metadata pulls, removals and outage preserve the vault", {
     assert.match(updating, /topics: \["Product"\]/);
     assert.match(updating, /journal-date: "2026-11-11"/);
     await put(`${database}_text/pagetext:page`, { ...recognition, _rev: textRevision.rev,
-      sourceRev: nextPageRevision.rev, text: "Updated handwriting transcript" });
+      sourceRev: nextPageRevision.rev, format: "markdown",
+      text: "# Updated handwriting transcript\n- [x] Done\n\n| Item | Qty |\n| --- | ---: |\n| Milk | 3 |" });
     await p.sync(true);
     const refreshed = f.snapshot().find(([path]) => path.includes("/Entries/"))![1];
     assert.match(refreshed, /Updated handwriting transcript/);
+    assert.match(refreshed, /# Updated handwriting transcript\n- \[x\] Done/);
+    assert.match(refreshed, /\| Milk \| 3 \|/);
     assert.doesNotMatch(refreshed, /First handwriting transcript|Updating handwriting transcription/);
     assert.match(refreshed, /Earlier exact source/);
     organization = { ...organization, topics: { product: { name: "Product", present: false, counter: 2, writer: "ipad" } } };

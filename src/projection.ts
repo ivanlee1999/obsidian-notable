@@ -245,6 +245,7 @@ export class Library {
         number: index + 1,
         title: owned?.title ?? text?.pageTitle ?? null,
         text: text ? (text.text ?? "") : null,
+        format: text?.format,
         inkPath: this.inkPaths.get(pageId) ?? null,
         flowText: flow.text,
         previousText: flow.versions,

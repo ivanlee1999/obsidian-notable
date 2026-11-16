@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { MANAGED_BY, notePath, pageHeadingTitle, renderNote, sanitizeFilename, yamlString } from "../src/render.ts";
+import { MANAGED_BY, notePath, pageHeadingTitle, renderNote, sanitizeFilename, yamlString, transcriptMarkdown } from "../src/render.ts";
+import { Library } from "../src/projection.ts";
 import type { PageEntry } from "../src/model.ts";
 
 const page = (overrides: Partial<PageEntry> = {}): PageEntry => ({
@@ -157,4 +158,69 @@ test("folders on the tablet become folders in the vault", () => {
     notePath("Handwritten", ["Work", "2026"], "Standups", "id", false),
     "Handwritten/Work/2026/Standups.md",
   );
+});
+
+const structured = "# Project\n\n## Tasks\n- [x] Done\n- [ ] Next\n  - detail\n1. First\n2. Second\n\n| Item | Qty | Note |\n| :--- | ---: | :---: |\n| Milk | 2 | |\n| A \\| B | 1 | yes |";
+const renderedStructured = structured.replace("| Milk | 2 | |", "| Milk | 2 |  |");
+
+test("marked transcripts retain headings, list order/indent, task state and table cells/alignment", () => {
+  assert.equal(transcriptMarkdown(structured, "markdown"), renderedStructured);
+  assert.equal(transcriptMarkdown("paragraph\nA | B\n--- | ---\n| | value |", "markdown"),
+    "paragraph\n\n| A | B |\n| --- | --- |\n|  | value |");
+  assert.equal(transcriptMarkdown("| | |\n| --- | --- |\n| Milk | 2 |", "markdown"),
+    "|  |  |\n| --- | --- |\n| Milk | 2 |");
+  assert.equal(transcriptMarkdown("- [ ]\n- [X]", "markdown"), "- [ ] \n- [x]");
+});
+
+test("missing/unknown format remains literal, including apparent tasks and headings", () => {
+  for (const format of [undefined, "plain", "html", "Markdown"]) {
+    const rendered = transcriptMarkdown(structured, format);
+    assert.match(rendered, /^&#35; Project/);
+    assert.match(rendered, /\\- &#91;x&#93; Done/);
+    assert.doesNotMatch(rendered, /^#{1,6} |^\s*- \[[ x]\]|^\|/m);
+    assert.match(rendered, /1\\\. First/);
+  }
+});
+
+test("derived content cannot embed vault files, load remote images, execute queries, hide comments or create tags", () => {
+  const source = "# <img src=https://example.invalid/x>\n![[Private]]\n![remote](https://example.invalid/x)\n```dataviewjs\nalert(1)\n```\n#newtag %%hidden%% ^block $math$";
+  const rendered = transcriptMarkdown(source, "markdown");
+  assert.match(rendered, /^# &#60;img/);
+  assert.doesNotMatch(rendered, /!\[|<img|```|#newtag|%%|\^block|\$math\$/);
+  const note = renderNote({ notebookId: "b", title: "N", pages: [{ pageId: "p", number: 1,
+    title: null, text: source, format: "markdown", stale: false, inkPath: "ink.png",
+    flowText: "# My exact typed source\n\n- [x] Original typed task\n![[My own embed]]" }] });
+  assert.match(note, /# My exact typed source\n\n- \[x\] Original typed task\n!\[\[My own embed\]\]/);
+  assert.match(note, /!\[\[ink.png\]\]/);
+  assert.doesNotMatch(note, /<img|!\[\[Private\]\]|```dataviewjs/);
+});
+
+test("format survives cache restart, metadata changes, staleness and erasing without changing canonical blocks/topics", () => {
+  const lib = new Library();
+  lib.applyNotebook({ _id: "notebook:b", title: "Notes", pageIds: ["p"] });
+  const organization = { _id: "journal:b", type: "journal", schema: 1, notebookId: "b", date: "2026-11-16", createdAt: 1,
+    topics: { keep: { name: "Keep", present: true, counter: 1, writer: "boox" },
+      removed: { name: "Removed", present: false, counter: 2, writer: "ipad" } } };
+  lib.applyOrganizationSnapshot([organization]);
+  const source = { _id: "page:p", _rev: "1-source", notebookId: "b", title: "Plan", blocks: [
+    { id: "typed", kind: "md", text: "Exact typed paragraph.", orderKey: "1" },
+  ] };
+  lib.applyPageContents([source]);
+  lib.applyText({ _id: "pagetext:p", notebookId: "b", text: structured, format: "markdown", sourceRev: "1-source" });
+  const planned = lib.plan("Notes");
+  assert.ok(planned[0].contents.includes(renderedStructured));
+  const restored = new Library();
+  assert.equal(restored.restore(lib.snapshot()), true);
+  restored.applyNotebook({ _id: "notebook:b", title: "Notes", pageIds: ["p"] });
+  assert.deepEqual(restored.plan("Notes"), planned);
+  restored.applyPageContents([{ ...source, _rev: "2-edit" }]);
+  assert.match(restored.plan("Notes")[0].contents, /Updating handwriting transcription/);
+  restored.applyText({ _id: "pagetext:p", notebookId: "b", text: "", format: "markdown", sourceRev: "2-edit" });
+  const blank = restored.plan("Notes")[0].contents;
+  assert.match(blank, /Exact typed paragraph\./);
+  assert.doesNotMatch(blank, /# Project|Tasks|Milk|Updating handwriting/);
+  assert.match(blank, /journal-date: "2026-11-16"/);
+  assert.match(blank, /topics: \["Keep"\]/);
+  assert.deepEqual(restored.snapshot().organization, [organization]);
+  assert.equal(source.blocks[0].text, "Exact typed paragraph.");
 });

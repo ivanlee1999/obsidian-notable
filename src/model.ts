@@ -20,6 +20,8 @@ export interface PageTextDoc {
   notebookId?: string | null;
   pageTitle?: string | null;
   text?: string;
+  /** Only the exact supported marker enables structured derived text. */
+  format?: string;
   engine?: string;
   language?: string | null;
   /** The page's `updatedAt` when the recognition ran. Text is stale once the page moves past it. */
@@ -123,6 +125,7 @@ export interface PageEntry {
   number: number;
   title: string | null;
   text: string | null;
+  format?: string;
   stale: boolean;
   inkPath?: string | null;
   /** Canonical typed Markdown, separate from derived handwriting recognition. */
