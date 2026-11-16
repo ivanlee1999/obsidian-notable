@@ -181,6 +181,7 @@ test("missing/unknown format remains literal, including apparent tasks and headi
     assert.match(rendered, /\\- &#91;x&#93; Done/);
     assert.doesNotMatch(rendered, /^#{1,6} |^\s*- \[[ x]\]|^\|/m);
     assert.match(rendered, /1\\\. First/);
+    assert.equal(transcriptMarkdown("Title\n===\n   ---", format), "Title  \n\\===  \n   \\---");
   }
 });
 

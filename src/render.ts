@@ -202,7 +202,7 @@ export function escapeMarkdownText(source: string): string {
 function literal(line: string): string {
   return escapeMarkdownText(line).replace(/^(\s*)([-+])(?=\s|$)/, "$1\\$2")
     .replace(/^(\s*\d+)([.)])(?=\s)/, "$1\\$2")
-    .replace(/^-{3,}\s*$/, value => "\\" + value);
+    .replace(/^([ \t]{0,3})([-=]+)([ \t]*)$/, "$1\\$2$3");
 }
 
 /** Split real cell separators, retaining escaped pipes/backslashes and empty cells. */
