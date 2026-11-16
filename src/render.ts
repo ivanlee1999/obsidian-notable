@@ -232,13 +232,16 @@ export function transcriptMarkdown(source: string, format?: string): string {
     const header = cells(lines[i]), divider = cells(lines[i + 1] ?? "");
     if (header && divider?.length === header.length && divider.every(cell => /^:?-{3,}:?$/.test(cell))) {
       if (output.length && output.at(-1) !== "") output.push("");
-      const row = (values: string[]) => `| ${values.map(escapeMarkdownText).join(" | ")} |`;
-      output.push(row(header), `| ${divider.join(" | ")} |`); i++;
+      const rows: string[][] = []; i++;
       while (i + 1 < lines.length) {
         const body = cells(lines[i + 1]);
-        if (!body || body.length !== header.length) break;
-        output.push(row(body)); i++;
+        if (!body) break;
+        rows.push(body); i++;
       }
+      const count = Math.max(header.length, ...rows.map(row => row.length));
+      const padded = (values: string[], empty = "") => [...values, ...Array(count - values.length).fill(empty)];
+      const row = (values: string[]) => `| ${padded(values).map(escapeMarkdownText).join(" | ")} |`;
+      output.push(row(header), `| ${padded(divider, "---").join(" | ")} |`, ...rows.map(row));
       output.push(""); continue;
     }
     const heading = /^\s{0,3}(#{1,6})\s+(.*)$/.exec(lines[i]);

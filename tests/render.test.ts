@@ -170,6 +170,8 @@ test("marked transcripts retain headings, list order/indent, task state and tabl
   assert.equal(transcriptMarkdown("| | |\n| --- | --- |\n| Milk | 2 |", "markdown"),
     "|  |  |\n| --- | --- |\n| Milk | 2 |");
   assert.equal(transcriptMarkdown("- [ ]\n- [X]", "markdown"), "- [ ] \n- [x]");
+  assert.equal(transcriptMarkdown("| A | B |\n| --- | ---: |\n| one | two | three |\n| last |", "markdown"),
+    "| A | B |  |\n| --- | ---: | --- |\n| one | two | three |\n| last |  |  |");
 });
 
 test("missing/unknown format remains literal, including apparent tasks and headings", () => {
