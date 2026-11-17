@@ -130,6 +130,31 @@ test("metadata-only notes generate entry, day and topic files and survive restar
   assert.match(f.saved().projectionSource, /first\.test/);
 });
 
+test("automatic content renames preserve note identity and manual edits, then a manual name pins it", async () => {
+  const f = fixture(), p = f.plugin();
+  f.server.org = [];
+  f.server.books[0].title = "";
+  f.server.pages = [{ _id: "page:page", _rev: "1-typed", notebookId: "note", blocks: [{ id: "body", text: "# First idea" }] }];
+  await p.sync(true);
+  const entry = f.files.get("Handwritten/First idea.md") as File;
+  assert.ok(entry instanceof File);
+  entry.contents += "\nManual annotation must survive.\n";
+  const manual = entry.contents;
+  f.server.pages[0] = { ...f.server.pages[0], _rev: "2-typed", blocks: [{ id: "body", text: "# Second idea" }] };
+  await p.sync(true);
+  assert.equal(f.files.get("Handwritten/Second idea.md"), entry);
+  assert.equal(f.files.has("Handwritten/First idea.md"), false);
+  assert.ok(f.snapshot().some(([path, contents]) => path.includes("/_recovered/") && contents === manual));
+  assert.equal(f.server.books[0].title, "");
+  f.server.books[0].title = "Chosen title";
+  await p.sync(true);
+  assert.equal(f.files.get("Handwritten/Chosen title.md"), entry);
+  f.server.pages[0].blocks[0].text = "# Later content";
+  await p.sync(true);
+  assert.equal(f.files.get("Handwritten/Chosen title.md"), entry);
+  assert.match(entry.contents, /# Later content/);
+});
+
 test("structured recognition refreshes through real plugin projection while preserving typed text and manual edits", async () => {
   const f = fixture(), p = f.plugin();
   f.server.pages = [{ _id: "page:page", _rev: "1-ink", notebookId: "note", blocks: [

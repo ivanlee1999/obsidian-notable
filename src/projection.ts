@@ -9,7 +9,7 @@ import {
   flowingText,
   isPageContentDoc,
 } from "./model.ts";
-import { fileId, notePath, renderIndex, renderNote, type ManagedKind } from "./render.ts";
+import { contentTitle, escapeMarkdownText, fileId, notePath, renderIndex, renderNote, type ManagedKind } from "./render.ts";
 import { mergeOrganization, organizationSnapshot, type OrganizationDoc } from "./organization.ts";
 
 /**
@@ -240,22 +240,43 @@ export class Library {
       const flow = owned ? flowingText(owned) : { text: null, versions: [] };
       const pageClock = millis(owned?.updatedAt ?? this.pageClocks.get(pageId));
       const recognizedClock = millis(text?.recognizedClock);
+      const foreign = text && ((text.pageId !== undefined && text.pageId !== pageId) ||
+        (text.notebookId != null && text.notebookId !== idOf(notebook._id)));
+      const bound = text && owned && text.pageId === pageId && text.notebookId === idOf(notebook._id) &&
+        typeof owned._rev === "string" && text.sourceRev === owned._rev &&
+        /^sha256:[0-9a-f]{64}$/.test(text.sourceFingerprint ?? "") && /^scribe-v2:[0-9a-f]{64}$/.test(text.pipelineVersion ?? "");
       return {
         pageId,
         number: index + 1,
-        title: owned?.title ?? text?.pageTitle ?? null,
+        title: owned ? owned.title ?? null : foreign || text?.sourceRev ? null : text?.pageTitle ?? null,
         text: text ? (text.text ?? "") : null,
         format: text?.format,
+        handwritingTitle: bound ? contentTitle(text.text) : null,
         inkPath: this.inkPaths.get(pageId) ?? null,
         flowText: flow.text,
         previousText: flow.versions,
         // Revision-aware results require an exact source match, including after equal-clock
         // edits. Older recognition documents keep their clock-based compatibility behavior.
-        stale: text?.sourceRev !== undefined
+        stale: Boolean(foreign) || (text?.sourceRev !== undefined
           ? !owned?._rev || text.sourceRev !== owned._rev
-          : pageClock !== null && recognizedClock !== null && pageClock > recognizedClock,
+          : pageClock !== null && recognizedClock !== null && pageClock > recognizedClock),
       };
     });
+  }
+
+  /** New unnamed notes follow content; every nonblank canonical name stays authoritative. */
+  private displayTitle(notebook: NotebookDoc, pages: PageEntry[]): string {
+    if (notebook.title?.trim()) return notebook.title.trim();
+    for (const page of pages) {
+      const source = this.pageContents.get(page.pageId);
+      if (!source || source.notebookId !== idOf(notebook._id)) continue;
+      if (source.title?.trim()) return source.title.trim().replace(/[\r\n]+/g, " ");
+      const typed = contentTitle(page.flowText);
+      if (typed) return typed;
+      const title = page.handwritingTitle;
+      if (title) return title;
+    }
+    return "Untitled";
   }
 
   /**
@@ -267,24 +288,26 @@ export class Library {
    */
   plan(root: string, resolvePath: (path: string, identity: string) => string = path => path): PlannedNote[] {
     const notebooks = this.liveNotebooks();
+    const pagesByNotebook = new Map(notebooks.map(book => [idOf(book._id), this.pages(book)]));
+    const titles = new Map(notebooks.map(book => [idOf(book._id), this.displayTitle(book, pagesByNotebook.get(idOf(book._id))!)]));
 
     // Which titles more than one notebook wants, so only genuine collisions take an id suffix.
     const titleCounts = new Map<string, number>();
     for (const notebook of notebooks) {
-      const key = `${this.folderPath(notebook).join("/")}/${notebook.title ?? ""}`;
+      const key = `${this.folderPath(notebook).join("/")}/${titles.get(idOf(notebook._id))}`;
       titleCounts.set(key, (titleCounts.get(key) ?? 0) + 1);
     }
 
     const planned: PlannedNote[] = [];
     for (const notebook of notebooks) {
-      const pages = this.pages(notebook);
       const notebookId = idOf(notebook._id);
+      const pages = pagesByNotebook.get(notebookId)!;
       const organization = this.organization.get(notebookId);
       if (!organization && !pages.some((page) => page.text !== null || page.inkPath ||
         page.flowText !== null || page.previousText?.length)) continue;
       const folderPath = this.folderPath(notebook);
-      const title = notebook.title?.trim() || "Untitled";
-      const key = `${folderPath.join("/")}/${notebook.title ?? ""}`;
+      const title = titles.get(notebookId)!;
+      const key = `${folderPath.join("/")}/${title}`;
 
       planned.push({
         notebookId,
@@ -319,11 +342,13 @@ export class Library {
       }
     }
     const link = (note: PlannedNote, indexPath: string): string => {
-      const title = this.notebooks.get(note.notebookId)?.title || "Untitled";
+      const title = titles.get(note.notebookId) ?? "Untitled";
       const from = indexPath.split("/").slice(0, -1), to = note.path.split("/");
       while (from.length && to.length && from[0] === to[0]) { from.shift(); to.shift(); }
       const relative = [...from.map(() => ".."), ...to].map(encodeURIComponent).join("/");
-      const label = title.replace(/[\r\n]/g, " ").replace(/[\\\[\]<>`*_]/g, "\\$&");
+      const label = this.notebooks.get(note.notebookId)?.title?.trim()
+        ? title.replace(/[\r\n]/g, " ").replace(/[\\\[\]<>`*_]/g, "\\$&")
+        : escapeMarkdownText(title);
       return `- [${label}](<${relative}>)`;
     };
     const chronological = (notes: PlannedNote[], direction = 1): PlannedNote[] => [...notes].sort((a, b) =>

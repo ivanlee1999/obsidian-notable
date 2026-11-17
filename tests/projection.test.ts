@@ -31,6 +31,99 @@ function library(): Library {
   return lib;
 }
 
+test("new blank names follow typed content, keep journal links stable and preserve every manual name", () => {
+  const lib = new Library();
+  const book = notebook({ _id: "notebook:book-1", title: "" });
+  const organization = { _id: "journal:book-1", type: "journal", schema: 1, notebookId: "book-1", date: "2026-11-16", createdAt: 1,
+    topics: { work: { name: "Work", present: true, counter: 1, writer: "boox" },
+      removed: { name: "Removed", present: false, counter: 2, writer: "ipad" } } };
+  lib.applyNotebook(book); lib.applyOrganizationSnapshot([organization]);
+  const source = { _id: "page:page-1", _rev: "1-typed", notebookId: "book-1", blocks: [{ id: "body", kind: "md", text: "# Project plan\n\nExact original body" }] };
+  lib.applyPageContents([source]);
+  const preserved = JSON.stringify({ book, source, organization });
+  const initial = lib.plan("Notes"), entry = initial.find(note => !note.kind)!;
+  assert.match(entry.contents, /title: "Project plan"/);
+  assert.ok(initial.filter(note => note.kind).every(note => note.contents.includes("[Project plan]")));
+  assert.equal(JSON.stringify({ book, source, organization }), preserved);
+  lib.applyPageContents([{ ...source, _rev: "2-typed", blocks: [{ id: "body", kind: "md", text: "# Revised plan" }] }]);
+  const revised = lib.plan("Notes");
+  assert.equal(revised.find(note => !note.kind)!.path, entry.path);
+  assert.match(revised.find(note => !note.kind)!.contents, /title: "Revised plan"/);
+  assert.deepEqual(lib.snapshot().organization, [organization]);
+  for (const name of ["My title", "Untitled", "New notebook", "16 Nov 2026 12:45"]) {
+    lib.applyNotebook({ ...book, title: name });
+    assert.ok(lib.plan("Notes").find(note => !note.kind)!.contents.includes(`title: ${JSON.stringify(name)}\n`));
+  }
+});
+
+test("automatic handwriting names require current owned source and disappear after erasing", () => {
+  const lib = new Library(), book = notebook({ _id: "notebook:book-1", title: "" });
+  const source = { _id: "page:page-1", _rev: "1-ink", notebookId: "book-1", blocks: [] };
+  const recognized = text({ _id: "pagetext:page-1", pageId: "page-1", notebookId: "book-1", sourceRev: "1-ink",
+    sourceFingerprint: "sha256:" + "a".repeat(64), pipelineVersion: "scribe-v2:" + "b".repeat(64), text: "# Meal plan" });
+  lib.applyNotebook(book); lib.applyPageContents([source]); lib.applyText(recognized);
+  assert.equal(lib.plan("Notes")[0].path, "Notes/Meal plan.md");
+  for (const invalid of [
+    { sourceRev: undefined }, { sourceFingerprint: undefined }, { pipelineVersion: undefined },
+    { pageId: "different" }, { notebookId: "different" },
+  ]) {
+    lib.applyText({ ...recognized, ...invalid });
+    const note = lib.plan("Notes")[0];
+    assert.equal(note.path, "Notes/Untitled.md");
+    assert.doesNotMatch(note.contents, /## Page 1 — Meal plan/);
+    assert.match(note.contents, /Meal plan/); // Body compatibility remains available.
+  }
+  lib.applyText(recognized);
+  lib.applyPageContents([{ ...source, _rev: "2-ink" }]);
+  assert.equal(lib.plan("Notes")[0].path, "Notes/Untitled.md");
+  lib.applyText({ ...recognized, sourceRev: "2-ink", notebookId: "different", text: "Foreign name" });
+  assert.equal(lib.plan("Notes")[0].path, "Notes/Untitled.md");
+  lib.applyText({ ...recognized, sourceRev: "2-ink", text: "# Revised meal" });
+  assert.equal(lib.plan("Notes")[0].path, "Notes/Revised meal.md");
+  lib.applyNotebook({ ...book, title: "Pinned by hand" });
+  lib.applyText({ ...recognized, sourceRev: "2-ink", text: "# Late recognition" });
+  assert.equal(lib.plan("Notes")[0].path, "Notes/Pinned by hand.md");
+  lib.applyNotebook(book); lib.applyPageContents([{ ...source, _rev: "3-erased" }]);
+  lib.applyText({ ...recognized, sourceRev: "3-erased", text: "" });
+  assert.equal(lib.plan("Notes")[0].path, "Notes/Untitled.md");
+  assert.equal(book.title, "");
+});
+
+test("derived names cannot recreate wiki-links or tags removed from the organization", () => {
+  const lib = new Library();
+  lib.applyNotebook(notebook({ _id: "notebook:book-1", title: "" }));
+  lib.applyPageContents([{ _id: "page:page-1", notebookId: "book-1", blocks: [{ id: "b", text: "[[Private|Visible]] #removed" }] }]);
+  lib.applyOrganizationSnapshot([{ _id: "journal:book-1", type: "journal", schema: 1, notebookId: "book-1", date: "2026-11-16", createdAt: 1,
+    topics: { work: { name: "Work", present: true, counter: 1, writer: "boox" }, removed: { name: "removed", present: false, counter: 2, writer: "ipad" } } }]);
+  const plan = lib.plan("Notes");
+  const entry = plan.find(note => !note.kind)!;
+  assert.match(entry.contents, /title: "Visible #removed"/);
+  assert.match(entry.contents, /topics: \["Work"\]/);
+  for (const index of plan.filter(note => note.kind)) {
+    assert.match(index.contents, /\[Visible &#35;removed\]/);
+    assert.doesNotMatch(index.contents, /\[\[Private|(?<!&)#removed/);
+  }
+});
+
+test("automatic names follow live page order and collisions use resolved names", () => {
+  const lib = new Library();
+  lib.applyNotebook(notebook({ _id: "notebook:first", title: "", pageIds: ["empty", "named", "later"] }));
+  lib.applyNotebook(notebook({ _id: "notebook:second", title: "", pageIds: ["other"] }));
+  lib.applyPageContents([
+    { _id: "page:later", notebookId: "first", blocks: [{ id: "b", text: "Later content" }] },
+    { _id: "page:other", notebookId: "second", blocks: [{ id: "b", text: "Different" }] },
+    { _id: "page:named", notebookId: "first", title: "Page name", blocks: [{ id: "b", text: "Typed content" }] },
+    { _id: "page:empty", notebookId: "first", blocks: [] },
+  ]);
+  assert.deepEqual(lib.plan("Notes").map(note => note.path), ["Notes/Page name.md", "Notes/Different.md"]);
+  lib.applyPageContents([{ _id: "page:empty", notebookId: "first", blocks: [{ id: "b", text: "First page" }] }]);
+  assert.equal(lib.plan("Notes")[0].path, "Notes/First page.md");
+  lib.applyPageContents([{ _id: "page:other", notebookId: "second", blocks: [{ id: "b", text: "First page" }] }]);
+  const collision = lib.plan("Notes");
+  assert.equal(new Set(collision.map(note => note.path)).size, 2);
+  assert.deepEqual(collision.map(note => note.path), ["Notes/First page ~first.md", "Notes/First page ~second.md"]);
+});
+
 test("typed blocks render without OCR and preserve their source across restart and missing arrivals", () => {
   const lib = new Library();
   lib.applyNotebook(notebook({ _id: "notebook:book-1" }));

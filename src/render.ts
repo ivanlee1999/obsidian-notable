@@ -43,14 +43,37 @@ export function renderNote(input: NoteInput): string {
   return `${frontmatter}\n\n${body}\n`;
 }
 
+/** A display suggestion only; canonical names and content are never rewritten. */
+export function contentTitle(source: string | null | undefined): string | null {
+  for (const raw of (source ?? "").split(/\r\n?|\n/)) {
+    let line = raw.trim();
+    if (!line || /^(?:`{3,}|~{3,})/.test(line) || /^[\s|:-]+$/.test(line)) continue;
+    let previous: string, heading = false;
+    do {
+      previous = line;
+      if (/^#{1,6}(?:\s+|$)/.test(line)) heading = true;
+      line = line.replace(/^(?:>\s*|#{1,6}(?:\s+|$)|[-*+•](?:\s+|$)|(?:\d+[.)]|[①-⑳])(?:\s+|$)|\[[ xX]\](?:\s+|$))/, "").trim();
+    } while (line !== previous);
+    if (/^!(?:\[[^\]]*\]\([^)]*\)|\[\[[^\]]+\]\])$/.test(line)) continue;
+    if (heading) line = line.replace(/\s+#+\s*$/, "");
+    line = line.replace(/^\|\s*|\s*\|$/g, "")
+      .replace(/!?\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, target: string, alias: string | undefined) => alias ?? target)
+      .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+      .replace(/(\*\*|__|`)(.+?)\1/g, "$2")
+      .replace(/(^|\s)([*_])([^*_]+)\2(?=\s|$|[.,!?:;])/g, "$1$3")
+      .replace(/\\([\\`*_{}\[\]()#+.!>|~-])/g, "$1")
+      .replace(/\s+/g, " ").trim();
+    if (line === "[?]" || !/[\p{L}\p{N}\p{So}]/u.test(line)) continue;
+    const points = Array.from(line);
+    return points.length > 60 ? points.slice(0, 60).join("").trimEnd() + "…" : line;
+  }
+  return null;
+}
+
 export function pageHeadingTitle(page: PageEntry): string | null {
   if (page.title?.trim()) return page.title.trim().replace(/[\r\n]+/g, " ");
-  const firstLine = (page.flowText ?? page.text)?.split(/\r?\n/).find(line => line.trim());
-  if (!firstLine) return null;
-  const cleaned = firstLine.trim().replace(/^(?:[-*+•]|\d+[.)]|[①-⑳])\s*/, "")
-    .replace(/[\[\]]/g, "").trim().replace(/^#+\s*/, "").replace(/\s+/g, " ").trim();
-  const characters = Array.from(cleaned);
-  return characters.length > 60 ? `${characters.slice(0, 60).join("").trimEnd()}…` : cleaned || null;
+  return contentTitle(page.flowText) ?? (page.handwritingTitle !== undefined
+    ? page.handwritingTitle : page.stale ? null : contentTitle(page.text));
 }
 
 function renderPage(page: PageEntry, sideBySide: boolean): string {

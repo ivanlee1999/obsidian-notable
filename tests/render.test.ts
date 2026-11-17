@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { MANAGED_BY, notePath, pageHeadingTitle, renderNote, sanitizeFilename, yamlString, transcriptMarkdown } from "../src/render.ts";
+import { MANAGED_BY, contentTitle, notePath, pageHeadingTitle, renderNote, sanitizeFilename, yamlString, transcriptMarkdown } from "../src/render.ts";
 import { Library } from "../src/projection.ts";
 import type { PageEntry } from "../src/model.ts";
 
@@ -11,6 +11,26 @@ const page = (overrides: Partial<PageEntry> = {}): PageEntry => ({
   text: "milk, eggs",
   stale: false,
   ...overrides,
+});
+
+test("automatic title suggestions use meaningful visible text without changing literal words", () => {
+  const cases: [string, string | null][] = [
+    ["", null], ["\n# **Project plan**\nMore", "Project plan"],
+    ["> - [x] **Buy milk**", "Buy milk"], ["1) _Next step_", "Next step"],
+    ["```\n[?]\n---\nMeeting notes", "Meeting notes"],
+    ["| --- | :---: |\n# Café 中文", "Café 中文"],
+    ["See [roadmap](https://example.com) now", "See roadmap now"],
+    ["snake_case and 2*3", "snake_case and 2*3"],
+    ["| item | kg |", "item | kg"], ["##", null], ["[?]", null], ["...", null],
+    ["# Heading ###", "Heading"], ["> - ## Heading", "Heading"],
+    ["![Cover](url)\nActual note", "Actual note"], ["![[Private]]\nActual note", "Actual note"],
+    ["\\# literal", "# literal"], ["=", null], ["+", null],
+    ["[[Private|Visible name]]", "Visible name"], ["See [[Private]] #removed", "See Private #removed"],
+    ["😀".repeat(65), "😀".repeat(60) + "…"],
+  ];
+  for (const [source, expected] of cases) assert.equal(contentTitle(source), expected, source);
+  assert.equal(pageHeadingTitle(page({ stale: true, text: "# Erased heading" })), null);
+  assert.equal(pageHeadingTitle(page({ stale: true, flowText: "# Current typing", text: "# Old ink" })), "Current typing");
 });
 
 test("typed source, handwriting and previous versions remain distinct and keep the ink embed", () => {

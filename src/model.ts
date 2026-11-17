@@ -127,6 +127,8 @@ export interface PageEntry {
   text: string | null;
   format?: string;
   stale: boolean;
+  /** Current source-bound title; null excludes stale/legacy recognition from automatic names. */
+  handwritingTitle?: string | null;
   inkPath?: string | null;
   /** Canonical typed Markdown, separate from derived handwriting recognition. */
   flowText?: string | null;
