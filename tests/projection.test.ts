@@ -124,6 +124,21 @@ test("automatic names follow live page order and collisions use resolved names",
   assert.deepEqual(collision.map(note => note.path), ["Notes/First page ~first.md", "Notes/First page ~second.md"]);
 });
 
+test("removing every typed block clears an automatic name while retaining the empty notebook", () => {
+  const lib = new Library();
+  const book = notebook({ _id: "notebook:book-1", title: "" });
+  lib.applyNotebook(book);
+  lib.applyPageContents([{ _id: "page:page-1", _rev: "1", notebookId: "book-1", blocks: [{ id: "body", text: "# Old content" }] }]);
+  assert.equal(lib.plan("Notes")[0].path, "Notes/Old content.md");
+  const erased = { _id: "page:page-1", _rev: "2", notebookId: "book-1", blocks: [], deletedBlocks: [{ id: "body" }] };
+  lib.applyPageContents([erased]);
+  const note = lib.plan("Notes")[0];
+  assert.equal(note.path, "Notes/Untitled.md");
+  assert.doesNotMatch(note.contents, /Old content/);
+  assert.deepEqual(lib.snapshot().pageContents, [erased]);
+  assert.equal(book.title, "");
+});
+
 test("typed blocks render without OCR and preserve their source across restart and missing arrivals", () => {
   const lib = new Library();
   lib.applyNotebook(notebook({ _id: "notebook:book-1" }));

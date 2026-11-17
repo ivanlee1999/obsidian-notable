@@ -304,7 +304,8 @@ export class Library {
       const pages = pagesByNotebook.get(notebookId)!;
       const organization = this.organization.get(notebookId);
       if (!organization && !pages.some((page) => page.text !== null || page.inkPath ||
-        page.flowText !== null || page.previousText?.length)) continue;
+        page.flowText !== null || page.previousText?.length ||
+        (!notebook.title?.trim() && this.pageContents.get(page.pageId)?.notebookId === notebookId))) continue;
       const folderPath = this.folderPath(notebook);
       const title = titles.get(notebookId)!;
       const key = `${folderPath.join("/")}/${title}`;
