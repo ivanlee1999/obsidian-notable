@@ -24,6 +24,8 @@ test("automatic title suggestions use meaningful visible text without changing l
     ["| item | kg |", "item | kg"], ["##", null], ["[?]", null], ["...", null],
     ["# Heading ###", "Heading"], ["> - ## Heading", "Heading"],
     ["![Cover](url)\nActual note", "Actual note"], ["![[Private]]\nActual note", "Actual note"],
+    ["> ![Cover](url)\nActual note", "Actual note"], ["![icon](url) Actual title", "icon Actual title"],
+    ["① Heading", "Heading"], ["①", null],
     ["\\# literal", "# literal"], ["=", null], ["+", null],
     ["[[Private|Visible name]]", "Visible name"], ["See [[Private]] #removed", "See Private #removed"],
     ["😀".repeat(65), "😀".repeat(60) + "…"],
