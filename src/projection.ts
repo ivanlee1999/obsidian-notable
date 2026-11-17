@@ -96,6 +96,8 @@ export class Library {
   /** Whether any page text is known at all. An empty projection can plan nothing. */
   get isEmpty(): boolean {
     return this.texts.size === 0 && this.organization.size === 0 && this.inkPaths.size === 0 &&
+      ![...this.notebooks].some(([id, book]) => !book.title?.trim() &&
+        book.pageIds?.some(pageId => this.pageContents.get(pageId)?.notebookId === id)) &&
       ![...this.pageContents.values()].some(page => {
         const flow = flowingText(page); return flow.text !== null || flow.versions.length > 0;
       });

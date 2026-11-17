@@ -155,6 +155,23 @@ test("automatic content renames preserve note identity and manual edits, then a 
   assert.match(entry.contents, /# Later content/);
 });
 
+test("erasing the sole unnamed typed note clears its derived name and body", async () => {
+  const f = fixture(), p = f.plugin();
+  f.server.org = [];
+  f.server.books[0].title = "";
+  f.server.pages = [{ _id: "page:page", _rev: "1-typed", notebookId: "note", blocks: [{ id: "body", text: "# Old content" }] }];
+  await p.sync(true);
+  const entry = f.files.get("Handwritten/Old content.md") as File;
+  assert.ok(entry instanceof File);
+  f.server.pages[0] = { ...f.server.pages[0], _rev: "2-typed", blocks: [], deletedBlocks: [{ id: "body" }] };
+  const source = JSON.stringify([f.server.books, f.server.pages]);
+  await p.sync(true);
+  assert.equal(f.files.get("Handwritten/Untitled.md"), entry);
+  assert.equal(f.files.has("Handwritten/Old content.md"), false);
+  assert.doesNotMatch(entry.contents, /Old content/);
+  assert.equal(JSON.stringify([f.server.books, f.server.pages]), source);
+});
+
 test("structured recognition refreshes through real plugin projection while preserving typed text and manual edits", async () => {
   const f = fixture(), p = f.plugin();
   f.server.pages = [{ _id: "page:page", _rev: "1-ink", notebookId: "note", blocks: [
